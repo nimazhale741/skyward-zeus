@@ -1,0 +1,157 @@
+[device]
+codename = "zeus"
+brand = "Xiaomi"
+model = "Xiaomi 12 Pro"
+ab = true
+soc = { hans = "第一代骁龙®8移动平台", hant = "Snapdragon® 8 Gen 1 行動平台", en = "Snapdragon® 8 Gen 1 Mobile Platform" }
+os_version_prop = "ro.mi.os.version.incremental"
+
+[display]
+# The panel's own mode, which this phone runs its system at as well: its
+# persist.sys.miui_resolution holds 1440,3200,560, so the system scales
+# nothing down and the density is the system's own. The recovery asks the
+# panel for its size and lays the pages out at the density given here, which
+# at the panel's width comes to the same 411 dp the system has at 420 on a
+# 1080-wide mode.
+width = 1440
+height = 3200
+density = 560
+diagonal = 6.73
+
+[modules]
+# The stock recovery's ramdisk carries no modules at all: init.recovery.qcom.rc
+# insmods the audio modules straight out of /vendor/lib/modules at
+# early-init, so that partition is mounted before the recovery service runs
+# and holds the phone's 319 modules with the modules.dep they are read from.
+# vendor_dlkm carries the same list and is named after vendor, for the run
+# that finds that one mounted; the phone has no system_dlkm.
+sources = ["vendor", "vendor_dlkm"]
+# The touchscreen: ST FTS over SPI behind Xiaomi's touch layer, which
+# xiaomi_touch binds below it and brings the panel's event notifier with it.
+# The phone ships FocalTech's driver as well, which drives no device on the
+# units that carry this panel; it is left out rather than loaded and made to
+# fail, since every module the configuration names has to load.
+load = ["fts_touch_spi"]
+
+[touch]
+# What turns the controller's raw frames into touches is Xiaomi's touch
+# feature service, and a recovery runs none of it: the driver reports
+# positions itself, which this leaves on as the phone's system has it.
+writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
+
+# The WLAN firmware is on the modem partition, which the phone mounts at
+# /vendor/firmware_mnt and shows at /vendor/firmware.
+[firmware]
+partition = "modem"
+
+# persist, which the phone mounts at /mnt/vendor/persist: the WLAN's MAC
+# address is there, and so is what the key service needs for a key that
+# cannot be rolled back.
+[partitions]
+mounted = ["persist"]
+
+# What the phone's own init runs once the system has finished starting, as
+# kernel-post-boot in /vendor/etc/init/hw/init.qti.kernel.rc. The kernel
+# starts the CPU clusters on the performance governor, which holds them at
+# their highest clock; the script hands them to WALT, lets idle CPUs power
+# down and sets how the memory bus scales. Without it the CPUs stay at
+# their highest clock and voltage even while idle, and the phone slowly
+# heats up.
+[[service]]
+path = "/vendor/bin/sh"
+args = ["/vendor/bin/init.kernel.post_boot.sh"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+oneshot = true
+user = "root"
+groups = ["root", "system", "wakelock", "graphics"]
+
+# WLAN: Qualcomm's QCA6490 on the cnss2 platform driver, the module the
+# phone's own system has loaded as qca6490 and the one of the two it carries
+# whose firmware folder is in /vendor/etc/wifi. The driver reads its settings
+# and the MAC address through the firmware loader, so both are handed over
+# under the names it asks for; the MAC is read from persist, which is mounted
+# above, rather than by mounting that partition a second time. Once fs_ready
+# is written, cnss2 powers the chip up and wlan0 appears.
+#
+# The supplicant is the vendor partition's own, built from Android 12: it
+# registers with the hardware service directory of that version and runs on
+# its libraries, which the recovery carries under /skyward/hidl/a<sdk>. The
+# version is filled in from the stock image as the image is packed, and the
+# system's own copies come after, if at all.
+[wlan]
+modules = ["qca_cld3_qca6490"]
+writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
+firmware = [
+    { name = "wlan/qca_cld/qca6490/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/qca6490/WCNSS_qcom_cfg.ini" },
+    { name = "wlan/qca_cld/qca6490/wlan_mac.bin", path = "/mnt/vendor/persist/qca6490/wlan_mac.bin" },
+]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/skyward/hidl/a{sdk}/lib", "/vendor/lib64"]
+service = "android.hardware.wifi.supplicant.ISupplicant/default"
+probe = "http://connect.rom.miui.com/generate_204"
+# The chip's own coming up takes twenty seconds once its driver is in: cnss2
+# waits eleven of them for a MAC address from the modem's DMS service, which
+# a recovery has no modem to answer, and a first boot runs the chip's cold
+# boot calibration for six more, which its user would wait at the switch: the
+# driver is brought up as the recovery starts instead.
+prewarm = true
+
+# The update server the stock updater of the Chinese system asks.
+[update]
+server = "https://update.miui.com/updates/miotaV3.php"
+
+# No [stock] block: this recovery is built on the Chinese OS3.0.3.0.VLBCNXM,
+# whose full update package on the phone maker's own download server is what
+# the stock recovery image came out of, but the package's name carries a
+# hash of its own that the image cannot be made to say. The stock build's
+# name is kept here for the record:
+#   version  = "OS3.0.3.0.VLBCNXM"
+#   recovery = the stock recovery partition's SHA-256, printed by
+#              skyward-pack's own run of this build
+
+# The AW8697, which this phone's system drives through its own waves: the
+# driver registers an input device taking periodic force-feedback effects
+# (/dev/input/event2, FF_PERIODIC and the custom waveform among them), and
+# plays samples at the frequency it calibrates the motor to. That
+# calibration is kept: the driver measures f0 1670 as it probes, and the
+# factory's own value is in persist, which is mounted above, as 1662
+# (166.2 Hz, in tenths of a hertz as the pages read it). The system's own
+# clicks feel as one at a quarter of this, and past three quarters the
+# motor rattles, as on the phones already running this recovery.
+[haptics]
+resonance = "/mnt/vendor/persist/haptics/vib_cal_f0"
+strength = { lightest = 0.25, strongest = 0.75 }
+
+# The partitions a backup of the baseband and EFS takes: the baseband's
+# settings, with the IMEI, and the sensors' calibration. And what of the
+# data partition a backup leaves out because the secure world keeps it in
+# step with itself: its own storage, its apps' data, that of Xiaomi's own
+# trusted environment, the secure element's state and the fingerprint
+# templates.
+[backup]
+efs = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
+data_skipped = [
+    "vendor/tzstorage",
+    "vendor/qtee",
+    "vendor/mitee",
+    "vendor/goodix",
+    "vendor/fingerprint",
+    "vendor/fpdata",
+    "vendor/misc/mi_fp",
+]
+
+# Where the phone's own programs keep logs in the data partition: the
+# system's, the minidumps, what Xiaomi's log manager keeps of each part of
+# the phone, and what the modem and Wi-Fi leave when they crash.
+[wipe]
+logs = [
+    "/data/miuilog",
+    "/data/vendor/diag",
+    "/data/vendor/bsplog",
+    "/data/vendor/log",
+    "/data/vendor/ramdump",
+    "/data/vendor/ssrdump",
+    "/data/vendor/tombstones",
+    "/data/vendor/wlan_logs",
+]
