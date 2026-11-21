@@ -11,7 +11,7 @@
 
 ```
 devices/zeus.toml     设备配置：震动、WLAN 预热、模块加载、触摸、分区
-patches/              相对上游 v0.3.1 的 4 个补丁
+patches/              相对上游 v0.3.1 的 5 个补丁
 scripts/setup.sh      clone 上游 v0.3.1 + 打补丁，产出可编译的工作树
 scripts/pack-zeus.sh  把编译产物打成 100 MiB 可刷镜像
 scripts/release-zeus.sh  一键：编译 → 打包 → 按更新源命名压 zip → 可选 gh 发布
@@ -26,13 +26,14 @@ docs/刷入简易说明.md   手机上照着刷的一页说明
 | `crates_skyward_src_main.rs.patch` | 模块加载完成后起独立线程，按 `[wlan] prewarm` 提前把 Wi-Fi 芯片带起来 |
 | `crates_skyward_src_ui.rs.patch` | WLAN 页面初始为“关”，点开关才起 supplicant（行为回到上游原样，只改注释） |
 | `crates_skyward-config_src_lib.rs.patch` | `[wlan]` 增加 `#[serde(default)] pub prewarm: bool` |
+| `crates_skyward-net_src_github.rs.patch` | `LATEST` 指向 `nimazhale741/skyward-zeus` 的 releases（应用内更新源） |
 
 ## 构建
 
 依赖：`rustc 1.100+`、`cargo-ndk 4.1.2+`、NDK r28c（`ANDROID_NDK_HOME` 指向它）。
 
 ```bash
-./scripts/setup.sh                 # 拉上游 v0.3.1 到 ./upstream，打 4 个补丁，拷 device.toml
+./scripts/setup.sh                 # 拉上游 v0.3.1 到 ./upstream，打 5 个补丁，拷 device.toml
 cd upstream
 export PATH="$HOME/.cargo/bin:$PATH" ANDROID_NDK_HOME=/opt/android-ndk-r28c
 
