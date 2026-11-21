@@ -1,0 +1,12 @@
+# 编译工作树（setup.sh 生成）
+/upstream/
+
+# 构建产物
+/out/
+/target/
+*.img
+*.zip
+
+# 不入库的大文件：官方镜像与马达固件需自行获取
+/stock-recovery.img
+/aw8697_haptic.bin
