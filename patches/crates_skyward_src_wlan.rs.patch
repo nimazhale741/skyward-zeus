@@ -1,0 +1,34 @@
+--- a/crates/skyward/src/wlan.rs
++++ b/crates/skyward/src/wlan.rs
+@@ -39,8 +39,13 @@
+ const WIFI: u32 = 1010;
+ 
+ /// How long the driver may take to make its interface, the chip's firmware
+-/// loading meanwhile.
+-const INTERFACE_WAIT: Duration = Duration::from_secs(20);
++/// loading meanwhile. A phone whose modem partition is mounted at
++/// /vendor/firmware has no modem, so cnss2 waits about eleven seconds for a
++/// MAC address from the DMS service before it gives up and reads the one
++/// persist holds; a first boot also runs the chip's cold boot calibration,
++/// another six seconds. Both together come to twenty seconds, which this
++/// waited exactly, so it is given room to spare.
++const INTERFACE_WAIT: Duration = Duration::from_secs(45);
+ 
+ /// How long the supplicant may take to open its control socket.
+ const SOCKET_WAIT: Duration = Duration::from_secs(10);
+@@ -621,6 +626,15 @@
+ }
+ 
+ /// Load the driver where its interface is not there yet, and bring the
++/// interface up, ahead of the switch: the chip's own coming up takes
++/// thirteen to twenty seconds on this phone, which a recovery may as well
++/// spend while its user is still reading the screen. What this costs is the
++/// chip's power; what failing costs is the wait, not the WLAN.
++pub fn prewarm(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
++    bring_up(cfg, modules)
++}
++
++/// Load the driver where its interface is not there yet, and bring the
+ /// interface up.
+ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
+     let net = Path::new("/sys/class/net").join(&cfg.interface);
