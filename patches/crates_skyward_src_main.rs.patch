@@ -1,0 +1,30 @@
+--- a/crates/skyward/src/main.rs
++++ b/crates/skyward/src/main.rs
+@@ -545,6 +545,27 @@
+     for path in load_modules(cfg, &cfg.modules.load)? {
+         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
+     }
++    // Where the configuration asks for it, the WLAN's chip is brought up
++    // here, while the screen is still coming up. Its own start waits out the
++    // eleven seconds cnss2 gives the modem's DMS service to name a MAC
++    // address, which a recovery has no modem to answer, and a first boot
++    // runs the chip's calibration for six more, so its user would otherwise
++    // wait twenty seconds at the switch. On its own thread, so a chip that is
++    // slow to start holds up nothing but itself.
++    if let Some(wlan) = &cfg.wlan
++        && wlan.prewarm
++    {
++        let dirs = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
++        let wlan = wlan.clone();
++        std::thread::spawn(move || match crate::wlan::prewarm(&wlan, &dirs) {
++            Ok(()) => {
++                let _ = skyward_sys::kmsg("the WLAN's chip is up ahead of its switch");
++            }
++            Err(e) => {
++                let _ = skyward_sys::kmsg(&format!("the WLAN's chip is not up ahead of its switch: {e:#}"));
++            }
++        });
++    }
+     if !cfg.owners.is_empty() {
+         let handed = hand_over(&cfg.owners)?;
+         skyward_sys::kmsg(&format!("{handed} of the phone's own files handed to the accounts its init gives them"))?;
