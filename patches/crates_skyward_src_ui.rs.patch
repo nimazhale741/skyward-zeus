@@ -1,0 +1,17 @@
+--- a/crates/skyward/src/ui.rs
++++ b/crates/skyward/src/ui.rs
+@@ -1533,8 +1533,12 @@
+             }
+             self.app.set_update(standing);
+         }
+-        // The WLAN starts off. Without the bundle of the vendor interface's
+-        // libraries the supplicant does not start, and the WLAN page says why.
++        // The WLAN starts off, as its own switch leaves it: where the
++        // configuration asks for it, the chip is already being brought up
++        // ahead of the switch by the time the pages come up, so the switch
++        // finds the driver in and only the supplicant left to start. Without
++        // the bundle of the vendor interface's libraries the supplicant does
++        // not start, and the WLAN page says why.
+         if let Some(w) = &cfg.wlan {
+             self.app.state.wlan = Some(Wlan::default());
+             let modules = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
