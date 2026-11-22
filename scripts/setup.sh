@@ -29,7 +29,7 @@ for p in "$ROOT"/patches/*.patch; do
 done
 
 BASE_VERSION=$(grep -m1 '^version = "' Cargo.toml | cut -d'"' -f2)
-echo "==> 完成（上游版本 $BASE_VERSION）。发布前把 Cargo.toml 的 version 改成你的 tag 数字。"
+echo "==> 完成（上游版本 $BASE_VERSION）。版本号与上游保持一致，不要改动；发布 tag 用 v$BASE_VERSION。"
 cat <<'EOF'
 cd upstream
 export PATH="$HOME/.cargo/bin:$PATH" ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-/opt/android-ndk-r28c}
