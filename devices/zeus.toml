@@ -48,7 +48,7 @@ partition = "modem"
 # address is there, and so is what the key service needs for a key that
 # cannot be rolled back.
 [partitions]
-mounted = ["persist"]
+mounted = ["persist", "metadata"]
 
 # What the phone's own init runs once the system has finished starting, as
 # kernel-post-boot in /vendor/etc/init/hw/init.qti.kernel.rc. The kernel
