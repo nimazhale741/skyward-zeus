@@ -3,7 +3,7 @@
 小米 12 Pro（`zeus` / 2201122C / SM8450 / `taro`）的 [Skyward](https://github.com/MartyrsBlog/skyward)
 移植。上游是 kirklin 用 Rust 写的仿小米设置风格 Recovery；这里放这一台机器的适配文件。
 
-基底：官方 `OS3.0.3.0.VLBCNXM` 的 recovery 分区镜像（100 MiB 整块）。
+基底：官方 `OS3.0.3.0.VLBCNXM` 的 recovery 分区镜像（100 MiB 整块）；上游取 main 的 `a27b022`（v0.3.1 之后的 WLAN 重构）。
 已在 `OS4.0.0.44.XPBCNXM` 的 zeus 上实测通过。
 
 ## 目录
