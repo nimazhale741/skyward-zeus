@@ -1449,7 +1449,7 @@ index efe3e54..452f132 100644
      fn a_networks_round_button_opens_its_details_and_its_row_joins_it() {
          let (f, i) = (fonts(), info());
 diff --git a/crates/skyward-ui/src/pages.rs b/crates/skyward-ui/src/pages.rs
-index fee3424..e3400ad 100644
+index fee3424..dabf622 100644
 --- a/crates/skyward-ui/src/pages.rs
 +++ b/crates/skyward-ui/src/pages.rs
 @@ -21,6 +21,7 @@ use crate::widgets::{self, Caption, Detail, Fact, Outline, Row, Spec, SystemCard
@@ -1460,15 +1460,15 @@ index fee3424..e3400ad 100644
  use skyward_net::supplicant::Security;
  use skyward_net::wlan::{Bands, Network, Power, Stage as Joining};
  use skyward_systems::{Held, Who};
-@@ -591,6 +592,9 @@ pub fn specs(cx: &Ctx) -> Frame {
- 
-     if let Some(b) = &i.battery {
-         let mut rows = vec![(l.pick(texts::specs::LEVEL), fmt::level(l, b))];
+@@ -597,6 +598,9 @@ pub fn specs(cx: &Ctx) -> Frame {
+         if let Some(v) = fmt::wear(l, b) {
+             rows.push((l.pick(texts::specs::HEALTH), v));
+         }
 +        if let (Some(design), Some(full)) = (b.design, b.full) {
 +            rows.push((l.pick(texts::specs::BATTERY_CAPACITY), texts::specs::capacity_pair(l, fmt::mah(design), fmt::mah(full))));
 +        }
-         if let Some(v) = b.temp {
-             rows.push((l.pick(texts::specs::TEMPERATURE), fmt::celsius(v)));
+         if let Some(v) = b.cycles {
+             rows.push((l.pick(texts::specs::CHARGE_CYCLES), texts::specs::cycles(l, v)));
          }
 @@ -2491,6 +2495,42 @@ pub fn wlan(cx: &Ctx) -> Frame {
                      y = widgets::footnote(&mut c, t, f, y, &note);
