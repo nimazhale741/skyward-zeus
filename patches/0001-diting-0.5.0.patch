@@ -353,18 +353,120 @@ index ec33ac9..8410ea4 100644
 +    }
  }
 diff --git a/crates/skyward-net/src/github.rs b/crates/skyward-net/src/github.rs
-index ff45a89..d9f9a84 100644
+index ff45a89..4d799c7 100644
 --- a/crates/skyward-net/src/github.rs
 +++ b/crates/skyward-net/src/github.rs
-@@ -5,7 +5,7 @@ use anyhow::{bail, ensure, Context, Result};
+@@ -5,7 +5,11 @@ use anyhow::{bail, ensure, Context, Result};
  use serde::Deserialize;
  
  /// Where GitHub answers which release of Skyward is the newest.
 -pub const LATEST: &str = "https://api.github.com/repos/kirklin/skyward/releases/latest";
 +pub const LATEST: &str = "https://api.github.com/repos/nimazhale741/skyward-zeus/releases/latest";
++
++/// Public GitHub proxies tried before GitHub itself, fastest first: networks
++/// that cannot reach github.com often reach one of these.
++pub const PROXIES: [&str; 2] = ["https://v4.gh-proxy.org/", "https://gh-proxy.com/"];
  
  /// The version of GitHub's API the answer is read as.
  const API_VERSION: &str = "2022-11-28";
+@@ -35,6 +39,9 @@ pub struct Build {
+     pub size: u64,
+     /// Its SHA-256 as GitHub gives it, in hex.
+     pub sha256: String,
++    /// Where to fetch it when the proxies do not answer: the other proxy
++    /// hosts first, then GitHub itself.
++    pub fallback: Vec<String>,
+ }
+ 
+ impl Build {
+@@ -42,7 +49,11 @@ impl Build {
+     /// short-lived address, where GitHub's API gave one, then the release's
+     /// link on github.com, which some networks do not reach.
+     pub fn sources(&self, located: Option<String>) -> Vec<String> {
+-        located.into_iter().chain([self.link.clone()]).collect()
++        located
++            .into_iter()
++            .chain([self.link.clone()])
++            .chain(self.fallback.iter().cloned())
++            .collect()
+     }
+ }
+ 
+@@ -86,7 +97,7 @@ pub fn newest(answer: &str, codename: &str, running: &str) -> Result<Newest> {
+         Some(a) => {
+             let sha256 = a.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")).with_context(|| format!("GitHub gives no SHA-256 of {}", a.name))?;
+             ensure!(sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit()), "GitHub gives {} the SHA-256 {sha256}", a.name);
+-            Some(Build { sha256: sha256.to_lowercase(), name: a.name, url: a.url, link: a.browser_download_url, size: a.size })
++            Some(Build { sha256: sha256.to_lowercase(), name: a.name, url: a.url, link: a.browser_download_url, size: a.size, fallback: Vec::new() })
+         }
+     };
+     Ok(Newest { version: version.to_string(), newer: newest > this, build })
+@@ -95,21 +106,54 @@ pub fn newest(answer: &str, codename: &str, running: &str) -> Result<Newest> {
+ /// Ask GitHub for Skyward's newest release, and its zip for the phone
+ /// `codename` names, as the build of version `running`.
+ pub fn ask(agent: &ureq::Agent, codename: &str, running: &str) -> Result<Newest> {
++    let mut last = None;
++    for prefix in PROXIES {
++        match ask_at(agent, &format!("{prefix}{LATEST}"), codename, running) {
++            Ok(newest) => return Ok(proxied(newest, prefix)),
++            Err(e) => last = Some(e),
++        }
++    }
++    ask_at(agent, LATEST, codename, running).with_context(|| {
++        format!("ask GitHub itself, after every proxy failed: {:#}", last.map(|e| format!("{e:#}")).unwrap_or_default())
++    })
++}
++
++/// The same question, asked at `url`: GitHub's own answer, or [`PROXY`]'s.
++fn ask_at(agent: &ureq::Agent, url: &str, codename: &str, running: &str) -> Result<Newest> {
+     let mut response = agent
+-        .get(LATEST)
++        .get(url)
+         .header("Accept", "application/vnd.github+json")
+         .header("X-GitHub-Api-Version", API_VERSION)
+         .header("User-Agent", format!("Skyward/{running}"))
+         .call()
+-        .with_context(|| format!("ask {LATEST}"))?;
++        .with_context(|| format!("ask {url}"))?;
+     let status = response.status();
+-    let body = response.body_mut().read_to_string().with_context(|| format!("read the answer of {LATEST}"))?;
++    let body = response.body_mut().read_to_string().with_context(|| format!("read the answer of {url}"))?;
+     if !status.is_success() {
+         bail!(refusal(status, &body));
+     }
+     newest(&body, codename, running)
+ }
+ 
++/// Where a release was read through `prefix`, its zip goes through it too;
++/// the other proxies, then GitHub itself, are kept for when it does not
++/// answer.
++fn proxied(mut newest: Newest, prefix: &str) -> Newest {
++    if let Some(build) = &mut newest.build {
++        let direct = build.link.clone();
++        let mut fallback: Vec<String> = PROXIES
++            .iter()
++            .filter(|p| **p != prefix)
++            .map(|p| format!("{p}{direct}"))
++            .collect();
++        fallback.push(direct.clone());
++        build.fallback = fallback;
++        build.link = format!("{prefix}{direct}");
++        build.url.clear();
++    }
++    newest
++}
++
+ /// Where the file a build's `url` hands out is now, as GitHub's API sends
+ /// the build of version `running` that asks for it on: a short-lived
+ /// address of the file itself, away from github.com.
+@@ -164,6 +208,7 @@ mod tests {
+                 link: "https://github.com/kirklin/skyward/releases/download/v0.1.3/skyward-v0.1.3-ishtar-OS3.0.308.0.WMACNXM.zip".into(),
+                 size: 42739608,
+                 sha256: "62b66f7d13a0eb6c9af3359b5ec6f9c223fd9a86b1f8abab3e9d2646cb2ce534".into(),
++                fallback: None,
+             })
+         );
+         assert_eq!(newest(ANSWERED_013, "nezha", "0.1.2").unwrap().build.unwrap().size, 43145196);
 diff --git a/crates/skyward-net/src/lib.rs b/crates/skyward-net/src/lib.rs
 index 1e33a39..906a1c1 100644
 --- a/crates/skyward-net/src/lib.rs
@@ -788,6 +890,18 @@ index a4b9a90..2facda4 100644
              // On an unlocked device adbd keeps root when ro.secure is 0 and
              // lets any computer in without authorization when ro.adb.secure is
              // 0; init lets a later line of a property file override an earlier
+diff --git a/crates/skyward-preview/src/main.rs b/crates/skyward-preview/src/main.rs
+index d086e34..22fa48a 100644
+--- a/crates/skyward-preview/src/main.rs
++++ b/crates/skyward-preview/src/main.rs
+@@ -1535,6 +1535,7 @@ fn skyward_newest() -> Newest {
+             link: "https://github.com/kirklin/skyward/releases/download/v0.1.4/skyward-v0.1.4-nezha-OS4.0.4.0.XPACNXM.zip".into(),
+             size: 43_145_196,
+             sha256: "9f6165079529418d8f6635beddfdd9abf9a70c89d69eb467a9922b0db69bfaf1".into(),
++            fallback: Vec::new(),
+         }),
+     }
+ }
 diff --git a/crates/skyward-programs/src/secure.rs b/crates/skyward-programs/src/secure.rs
 index 33d73a5..5b63bfd 100644
 --- a/crates/skyward-programs/src/secure.rs
@@ -1318,6 +1432,18 @@ index 5aa0adf..45e684e 100644
      /// Ask the update server for the newest system, telling what it
      /// answered with [`App::update_checked`].
      CheckUpdate,
+diff --git a/crates/skyward-ui/src/app/skyward.rs b/crates/skyward-ui/src/app/skyward.rs
+index b27f6b7..5974e90 100644
+--- a/crates/skyward-ui/src/app/skyward.rs
++++ b/crates/skyward-ui/src/app/skyward.rs
+@@ -100,6 +100,7 @@ mod tests {
+                 link: "https://github.com/kirklin/skyward/releases/download/v0.1.4/skyward-v0.1.4-ishtar-OS3.0.308.0.WMACNXM.zip".into(),
+                 size: 42_739_608,
+                 sha256: "62b66f7d13a0eb6c9af3359b5ec6f9c223fd9a86b1f8abab3e9d2646cb2ce534".into(),
++            fallback: Vec::new(),
+             }),
+         }
+     }
 diff --git a/crates/skyward-ui/src/app/state.rs b/crates/skyward-ui/src/app/state.rs
 index 71677b7..d761bc8 100644
 --- a/crates/skyward-ui/src/app/state.rs
@@ -2450,6 +2576,34 @@ index 06374c8..36ce6c1 100644
              Effect::CheckUpdate => self.check_update()?,
              Effect::Download(release) => self.download(release, now)?,
              Effect::StopDownload => self.downloader.as_ref().context("there is no download to stop")?.stop(),
+diff --git a/crates/skyward/src/updates.rs b/crates/skyward/src/updates.rs
+index b5f0dae..72b2ae0 100644
+--- a/crates/skyward/src/updates.rs
++++ b/crates/skyward/src/updates.rs
+@@ -148,14 +148,17 @@ impl Worker {
+                 Task::UpdateSkyward { build, codename, path } => {
+                     let a = http::agent(servers.clone());
+                     *using.lock().expect("the agent is not held by a thread that panicked") = Some(a.clone());
+-                    let located = github::locate(&a, &build.url, skyward_info::VERSION)
+-                        .inspect_err(|e| {
+-                            let _ = skyward_sys::kmsg(&format!("asking GitHub where {} is: {e:#}", build.name));
+-                        })
+-                        .ok();
++                    let located = match build.url.is_empty() {
++                        true => None,
++                        false => github::locate(&a, &build.url, skyward_info::VERSION)
++                            .inspect_err(|e| {
++                                let _ = skyward_sys::kmsg(&format!("asking GitHub where {} is: {e:#}", build.name));
++                            })
++                            .ok(),
++                    };
+                     let mut located_again = false;
+                     let mut refused = |a: &ureq::Agent| {
+-                        if located_again {
++                        if located_again || build.url.is_empty() {
+                             return Again::Retry;
+                         }
+                         located_again = true;
 diff --git a/crates/skyward/src/wlan.rs b/crates/skyward/src/wlan.rs
 index 734a499..eb0a240 100644
 --- a/crates/skyward/src/wlan.rs
