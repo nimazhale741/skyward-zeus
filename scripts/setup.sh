@@ -1,14 +1,14 @@
-#!/usr/bin/env bash
-# 拉上游 Skyward 指定版本（tag 或 commit），应用本仓库的补丁，产出可编译的工作树。
+﻿#!/usr/bin/env bash
+# 拉上游 Skyward v0.5.0，应用本仓库补丁（diting 功能移植），产出可编译的工作树。
 #
-# 用法：./scripts/setup.sh [rev]        默认 a27b022（v0.3.1 之后的 wlan 重构）
+# 用法：./scripts/setup.sh [rev]        默认 v0.5.0
 # 结果：./upstream/  已打补丁、已放 devices/zeus.toml
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-REV=${1:-a27b022}
-UPSTREAM=https://github.com/MartyrsBlog/skyward
+REV=${1:-v0.5.0}
+UPSTREAM=https://github.com/kirklin/skyward
 
 echo "==> fetch $UPSTREAM @ $REV"
 rm -rf upstream
@@ -24,12 +24,12 @@ echo "==> 应用补丁"
 cd upstream
 for p in "$ROOT"/patches/*.patch; do
     echo "    $(basename "$p")"
-    git apply --check "$p" || { echo "!! $(basename "$p") 不能干净应用（上游可能已改），需要手工 rebase"; exit 1; }
+    git apply --check "$p" || { echo "!! $(basename "$p") 不能干净应用"; exit 1; }
     git apply "$p"
 done
 
 BASE_VERSION=$(grep -m1 '^version = "' Cargo.toml | cut -d'"' -f2)
-echo "==> 完成（上游版本 $BASE_VERSION）。版本号与上游保持一致，不要改动；发布 tag 用 v$BASE_VERSION。"
+echo "==> 完成（上游版本 $BASE_VERSION）"
 cat <<'EOF'
 cd upstream
 export PATH="$HOME/.cargo/bin:$PATH" ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-/opt/android-ndk-r28c}

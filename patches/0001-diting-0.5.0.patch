@@ -1,0 +1,2773 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 0831925..815a2b1 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2510,7 +2510,6 @@ version = "0.5.0"
+ dependencies = [
+  "anyhow",
+  "libc",
+- "skyward-sys",
+ ]
+ 
+ [[package]]
+@@ -2560,6 +2559,7 @@ dependencies = [
+  "sha2 0.10.9",
+  "skyward-binder",
+  "skyward-block",
++ "skyward-sys",
+ ]
+ 
+ [[package]]
+diff --git a/crates/skyward-binder/Cargo.toml b/crates/skyward-binder/Cargo.toml
+index f53d67b..89e044f 100644
+--- a/crates/skyward-binder/Cargo.toml
++++ b/crates/skyward-binder/Cargo.toml
+@@ -10,4 +10,3 @@ workspace = true
+ [dependencies]
+ anyhow = { workspace = true }
+ libc = { workspace = true }
+-skyward-sys = { path = "../skyward-sys" }
+diff --git a/crates/skyward-binder/src/parcel.rs b/crates/skyward-binder/src/parcel.rs
+index 0e6e510..fb9d180 100644
+--- a/crates/skyward-binder/src/parcel.rs
++++ b/crates/skyward-binder/src/parcel.rs
+@@ -2,8 +2,19 @@ use anyhow::{bail, Context, Result};
+ 
+ /// The mark libbinder writes into every call header. Both ends have to agree
+ /// on it: it tells apart the copies of libbinder a phone carries, and the one
+-/// the recovery's own programs are built from is the recovery copy.
+-const HEADER: i32 = i32::from_be_bytes(*b"RECO");
++/// the recovery's own programs are built from is the recovery copy. A service
++/// directory started from the installed system is built from the other copy,
++/// and turns away a call that carries the recovery's mark.
++const RECOVERY_HEADER: i32 = i32::from_be_bytes(*b"RECO");
++const SYSTEM_HEADER: i32 = i32::from_be_bytes(*b"SYST");
++
++static HEADER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(RECOVERY_HEADER);
++
++/// Speak the dialect of the installed system's own libbinder, for a service
++/// directory run from its partitions rather than from the recovery's.
++pub fn speak_the_system_dialect() {
++    HEADER.store(SYSTEM_HEADER, std::sync::atomic::Ordering::Relaxed);
++}
+ 
+ /// Strict mode gathers violations rather than acting on them; a caller with
+ /// no policy of its own still sets that bit.
+@@ -76,7 +87,7 @@ impl Parcel {
+         let mut p = Parcel::default();
+         p.i32(STRICT_MODE_PENALTY_GATHER);
+         p.i32(UNSET_WORK_SOURCE);
+-        p.i32(HEADER);
++        p.i32(HEADER.load(std::sync::atomic::Ordering::Relaxed));
+         p.string(interface);
+         p
+     }
+diff --git a/crates/skyward-binder/src/service.rs b/crates/skyward-binder/src/service.rs
+index 2b521a9..8192070 100644
+--- a/crates/skyward-binder/src/service.rs
++++ b/crates/skyward-binder/src/service.rs
+@@ -5,6 +5,9 @@
+ use crate::parcel::Parcel;
+ #[cfg(target_os = "android")]
+ use crate::status;
++// The functions that answer the directory need the driver, which only the
++// phone carries: on the computer the two types go unused.
++#[cfg(target_os = "android")]
+ use anyhow::{Context, Result};
+ 
+ /// The directory every program registers with and looks things up in.
+@@ -41,12 +44,35 @@ fn methods_of(sdk: u32) -> Methods {
+     }
+ }
+ 
+-/// The recovery's own version, which its property files give.
+-const SDK: &str = "ro.build.version.sdk";
++/// Ask the directory which numbering it keeps. A recovery may have started
++/// the installed system's own directory, built from a version of its own, so
++/// the numbering is found out rather than assumed.
++#[cfg(target_os = "android")]
++fn methods(binder: &crate::driver::Binder) -> Result<Methods> {
++    static KEPT: std::sync::OnceLock<Methods> = std::sync::OnceLock::new();
++    if let Some(kept) = KEPT.get() {
++        return Ok(*kept);
++    }
++    let mut tried = methods_of(LOOKUPS_DECLARED - 1);
++    for candidate in [methods_of(LOOKUPS_DECLARED), tried] {
++        tried = candidate;
++        if probe(binder, candidate.check_service).is_ok() {
++            let _ = KEPT.set(candidate);
++            return Ok(candidate);
++        }
++    }
++    Ok(tried)
++}
+ 
+-fn methods() -> Result<Methods> {
+-    let sdk = skyward_sys::prop(SDK).with_context(|| format!("the recovery says no {SDK}"))?;
+-    Ok(methods_of(sdk.parse().with_context(|| format!("{SDK} is {sdk:?}"))?))
++/// Ask the directory a lookup numbered `code` after a name nothing
++/// registers: any answer at all is what is looked for.
++#[cfg(target_os = "android")]
++fn probe(binder: &crate::driver::Binder, code: u32) -> Result<()> {
++    let directory = binder.directory()?;
++    let mut call = Parcel::call(DIRECTORY);
++    call.string(DIRECTORY);
++    let reply = directory.transact(code, &call)?;
++    status::ok(&mut reply.read())
+ }
+ 
+ /// Every dump priority a service can register at, and the one a service
+@@ -87,7 +113,7 @@ pub fn find<'a>(binder: &'a crate::driver::Binder, name: &str) -> Result<Option<
+     let directory = binder.directory()?;
+     let mut call = Parcel::call(DIRECTORY);
+     call.string(name);
+-    let reply = directory.transact(methods()?.check_service, &call).with_context(|| format!("look up {name}"))?;
++    let reply = directory.transact(methods(binder)?.check_service, &call).with_context(|| format!("look up {name}"))?;
+     let mut read = reply.read();
+     status::ok(&mut read).with_context(|| format!("look up {name}"))?;
+     match read.object().with_context(|| format!("read what the directory answered for {name}"))? {
+@@ -108,7 +134,7 @@ pub fn add(binder: &crate::driver::Binder, name: &str, number: u64) -> Result<()
+     call.object(number);
+     call.bool(false);
+     call.i32(DUMP_PRIORITY_DEFAULT);
+-    let reply = directory.transact(methods()?.add_service, &call).with_context(|| format!("register {name}"))?;
++    let reply = directory.transact(methods(binder)?.add_service, &call).with_context(|| format!("register {name}"))?;
+     status::ok(&mut reply.read()).with_context(|| format!("register {name}"))
+ }
+ 
+@@ -119,7 +145,7 @@ pub fn names(binder: &crate::driver::Binder) -> Result<Vec<String>> {
+     let directory = binder.directory()?;
+     let mut call = Parcel::call(DIRECTORY);
+     call.i32(DUMP_PRIORITY_ALL);
+-    let reply = directory.transact(methods()?.list_services, &call).context("list what has registered")?;
++    let reply = directory.transact(methods(binder)?.list_services, &call).context("list what has registered")?;
+     let mut read = reply.read();
+     status::ok(&mut read).context("list what has registered")?;
+     let count = read.i32().context("read how many have registered")?;
+@@ -151,7 +177,7 @@ pub fn declared(binder: &crate::driver::Binder, name: &str) -> Result<bool> {
+     let directory = binder.directory()?;
+     let mut call = Parcel::call(DIRECTORY);
+     call.string(name);
+-    let reply = directory.transact(methods()?.is_declared, &call).with_context(|| format!("ask whether {name} is described"))?;
++    let reply = directory.transact(methods(binder)?.is_declared, &call).with_context(|| format!("ask whether {name} is described"))?;
+     let mut read = reply.read();
+     status::ok(&mut read).with_context(|| format!("ask whether {name} is described"))?;
+     read.bool().with_context(|| format!("read whether {name} is described"))
+diff --git a/crates/skyward-config/src/lib.rs b/crates/skyward-config/src/lib.rs
+index c5eda3d..2956de2 100644
+--- a/crates/skyward-config/src/lib.rs
++++ b/crates/skyward-config/src/lib.rs
+@@ -129,6 +129,16 @@ pub struct Wlan {
+     /// The page the stock system asks over plain HTTP to tell whether a
+     /// network reaches the internet, which answers 204 with nothing.
+     pub probe: String,
++    /// Whether the chip is brought up as the recovery starts, rather than
++    /// when the WLAN is turned on. Its own coming up takes the better part
++    /// of ten seconds, which the user would wait at the switch.
++    #[serde(default)]
++    pub prewarm: bool,
++    /// The regulatory domain the chip is told as the supplicant starts.
++    /// Where none is told, its firmware keeps the world-safe table, which
++    /// holds none of the higher 5 GHz channels a router here sits on.
++    #[serde(default)]
++    pub country: Option<String>,
+ }
+ 
+ /// A value written to a file, such as a switch in sysfs.
+diff --git a/crates/skyward-crypto/Cargo.toml b/crates/skyward-crypto/Cargo.toml
+index 23cb7b7..b2d5c5d 100644
+--- a/crates/skyward-crypto/Cargo.toml
++++ b/crates/skyward-crypto/Cargo.toml
+@@ -22,3 +22,4 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
+ 
+ [target.'cfg(target_os = "android")'.dependencies]
+ libc = { workspace = true }
++skyward-sys = { path = "../skyward-sys" }
+diff --git a/crates/skyward-crypto/src/keystore.rs b/crates/skyward-crypto/src/keystore.rs
+index 257934d..9d287d8 100644
+--- a/crates/skyward-crypto/src/keystore.rs
++++ b/crates/skyward-crypto/src/keystore.rs
+@@ -25,6 +25,30 @@ const FN_KEY_BLOB: &str = "keymaster_key_blob";
+ const FN_SECDISCARDABLE: &str = "secdiscardable";
+ const FN_STRETCHING: &str = "stretching";
+ 
++/// The two words Android writes in the stretching file of a key it did not
++/// stretch: `nopassword` for a key its key service holds in hardware, and
++/// `none` for a key wrapped with the user's secret, which is how the key
++/// of a user who set a screen lock is kept. A build old enough to keep no
++/// such file at all stretched none either.
++const HARDWARE_HELD: &str = "nopassword";
++const SECRET_HELD: &str = "none";
++const UNSTRETCHED: [&str; 2] = [HARDWARE_HELD, SECRET_HELD];
++
++/// Whether the key in `dir` is wrapped with the user's secret, as the
++/// stretching file names it. A key the key service holds in hardware opens
++/// behind nothing the user knows, whatever the phone keeps about a
++/// credential: the phone may keep the state of a screen lock its owner has
++/// taken away.
++pub fn held_by_secret(dir: &Path) -> bool {
++    match fs::read_to_string(dir.join(FN_STRETCHING)) {
++        // A key the phone stretched is stretched with an algorithm of its
++        // own, which this does not carry; it is refused where the key
++        // itself is read, and counts as the hardware's here.
++        Ok(algorithm) => algorithm.trim() == SECRET_HELD,
++        Err(_) => true,
++    }
++}
++
+ /// SHA-512 of `data` behind a fixed prefix.
+ pub fn hash_with_prefix(prefix: &[u8], data: &[u8]) -> Vec<u8> {
+     let mut padded = prefix.to_vec();
+@@ -65,12 +89,26 @@ pub struct StoredKey {
+ impl StoredKey {
+     pub fn load(dir: &Path) -> Result<StoredKey> {
+         let read = |name: &str| fs::read(dir.join(name)).with_context(|| format!("read {}", dir.join(name).display()));
+-        let version = fs::read_to_string(dir.join(FN_VERSION)).with_context(|| format!("read {}", dir.join(FN_VERSION).display()))?;
++        let version = match fs::read_to_string(dir.join(FN_VERSION)) {
++            Ok(version) => version,
++            Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
++                "{} holds no key: either the metadata partition did not come up, or the phone's system has not written one since it was last wiped. Start that system once, and where this stays, send what `ls -la {}/..` and the recovery's log say",
++                dir.display(),
++                dir.display()
++            ),
++            Err(e) => return Err(e).with_context(|| format!("read {}", dir.join(FN_VERSION).display())),
++        };
+         if version.trim() != VERSION {
+             bail!("{} is written in layout {}, Skyward reads layout {VERSION}", dir.display(), version.trim());
+         }
+-        if dir.join(FN_STRETCHING).exists() {
+-            bail!("{} was written by an Android too old for Skyward to read", dir.display());
++        if let Ok(algorithm) = fs::read_to_string(dir.join(FN_STRETCHING)) {
++            // A key the phone stretched is stretched with an algorithm of
++            // its own, which this does not carry: only the two words
++            // Android writes for a key it left as it was are read on.
++            let algorithm = algorithm.trim();
++            if !UNSTRETCHED.contains(&algorithm) {
++                bail!("{} is stretched with {algorithm}, which Skyward does not read", dir.display());
++            }
+         }
+         let secdiscardable_hash = match dir.join(FN_SECDISCARDABLE).exists() {
+             true => hash_with_prefix(SECDISCARDABLE_PREFIX, &read(FN_SECDISCARDABLE)?),
+@@ -221,18 +259,55 @@ mod tests {
+         assert!(s.unwrap(Unwrap::<NoService>::Secret(b"s")).is_err());
+     }
+ 
++    /// A directory the phone's system has not written its key into yet has
++    /// no version file, which says so rather than that the phone is too
++    /// old or the key unreadable.
+     #[test]
+-    fn a_directory_in_an_older_layout_is_refused() {
+-        let dir = tempdir("older-layout");
++    fn a_directory_the_system_has_not_written_yet_says_so() {
++        let dir = tempdir("not-written");
++        assert!(refusal(&dir).contains("holds no key"), "{}", refusal(&dir));
++    }
++
++    /// A key the phone stretched is stretched with an algorithm of its own,
++    /// which this does not carry. The words Android writes for a key it left
++    /// as it was are read on: `nopassword` for one its key service holds,
++    /// `none` for one wrapped with the user's secret, which is how the key
++    /// of a user who set a screen lock is kept.
++    #[test]
++    fn a_stretched_key_is_refused_and_an_unstretched_one_is_read() {
++        let dir = tempdir("stretching");
+         fs::write(dir.join(FN_VERSION), "1").unwrap();
+         fs::write(dir.join(FN_ENCRYPTED_KEY), [0u8; 64]).unwrap();
+         fs::write(dir.join(FN_STRETCHING), "scrypt 15 8 1").unwrap();
+-        assert!(refusal(&dir).contains("too old"), "{}", refusal(&dir));
++        assert!(refusal(&dir).contains("scrypt 15 8 1"), "{}", refusal(&dir));
++        for unstretched in UNSTRETCHED {
++            fs::write(dir.join(FN_STRETCHING), unstretched).unwrap();
++            assert!(StoredKey::load(&dir).is_ok(), "{} was refused", dir.display());
++        }
+         fs::remove_file(dir.join(FN_STRETCHING)).unwrap();
+         fs::write(dir.join(FN_VERSION), "2").unwrap();
+         assert!(refusal(&dir).contains("layout 2"), "{}", refusal(&dir));
+     }
+ 
++    /// A key the key service holds in hardware is behind nothing the user
++    /// knows, whatever the phone keeps about a credential; one wrapped
++    /// with the user's secret needs it. The word for each is the
++    /// stretching file's own, and a key stretched with an algorithm of its
++    /// own counts as the hardware's here, for its refusal to come where
++    /// the key itself is read.
++    #[test]
++    fn the_stretching_file_says_whose_hand_the_key_is_in() {
++        let dir = tempdir("held-by");
++        fs::write(dir.join(FN_STRETCHING), HARDWARE_HELD).unwrap();
++        assert!(!held_by_secret(&dir));
++        fs::write(dir.join(FN_STRETCHING), SECRET_HELD).unwrap();
++        assert!(held_by_secret(&dir));
++        fs::write(dir.join(FN_STRETCHING), "scrypt 15 8 1").unwrap();
++        assert!(!held_by_secret(&dir));
++        fs::remove_file(dir.join(FN_STRETCHING)).unwrap();
++        assert!(held_by_secret(&dir));
++    }
++
+     #[test]
+     fn a_directory_without_a_secdiscardable_blob_binds_to_nothing_extra() {
+         let dir = tempdir("no-secdiscardable");
+diff --git a/crates/skyward-modules/src/lib.rs b/crates/skyward-modules/src/lib.rs
+index ec33ac9..8410ea4 100644
+--- a/crates/skyward-modules/src/lib.rs
++++ b/crates/skyward-modules/src/lib.rs
+@@ -43,6 +43,22 @@ pub fn load(dirs: &[PathBuf], names: &[String]) -> Result<Vec<PathBuf>> {
+     Ok(loaded)
+ }
+ 
++/// Load `names` one at a time, so that one the phone's own build does not
++/// carry leaves the rest to load: a driver that is not there costs its own
++/// device and nothing else. Returns the files loaded and, for each name
++/// that could not be, the name and why.
++pub fn load_each(dirs: &[PathBuf], names: &[String]) -> (Vec<PathBuf>, Vec<(String, anyhow::Error)>) {
++    let mut loaded = Vec::new();
++    let mut failed = Vec::new();
++    for name in names {
++        match load(dirs, std::slice::from_ref(name)) {
++            Ok(paths) => loaded.extend(paths),
++            Err(e) => failed.push((name.clone(), e)),
++        }
++    }
++    (loaded, failed)
++}
++
+ /// A `modules.dep` graph: each module file mapped to the module files it
+ /// depends on. Keys and values are reduced to bare file names so the graph is
+ /// independent of where the modules were sourced from (GKI devices keep them
+@@ -182,4 +198,17 @@ mod tests {
+     fn strips_paths_to_basenames() {
+         assert_eq!(basename("kernel/drivers/foo/bar.ko"), "bar.ko");
+     }
++
++    /// A configuration names every touchscreen driver the phone's builds
++    /// have carried, and only one of them is in the build it runs now: the
++    /// others are reported and the rest still load.
++    #[test]
++    fn a_module_the_build_lacks_is_named_and_does_not_stop_the_rest() {
++        let dir = tempfile::tempdir().unwrap();
++        std::fs::write(dir.path().join("modules.dep"), "goodix_core.ko:\n").unwrap();
++        let names = ["goodix_core".to_string(), "fts_touch_spi".to_string()];
++        let (loaded, failed) = load_each(&[dir.path().to_path_buf()], &names);
++        assert!(loaded.is_empty());
++        assert_eq!(failed.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), names);
++    }
+ }
+diff --git a/crates/skyward-net/src/github.rs b/crates/skyward-net/src/github.rs
+index ff45a89..d9f9a84 100644
+--- a/crates/skyward-net/src/github.rs
++++ b/crates/skyward-net/src/github.rs
+@@ -5,7 +5,7 @@ use anyhow::{bail, ensure, Context, Result};
+ use serde::Deserialize;
+ 
+ /// Where GitHub answers which release of Skyward is the newest.
+-pub const LATEST: &str = "https://api.github.com/repos/kirklin/skyward/releases/latest";
++pub const LATEST: &str = "https://api.github.com/repos/nimazhale741/skyward-zeus/releases/latest";
+ 
+ /// The version of GitHub's API the answer is read as.
+ const API_VERSION: &str = "2022-11-28";
+diff --git a/crates/skyward-net/src/lib.rs b/crates/skyward-net/src/lib.rs
+index 1e33a39..906a1c1 100644
+--- a/crates/skyward-net/src/lib.rs
++++ b/crates/skyward-net/src/lib.rs
+@@ -7,6 +7,7 @@ pub mod http;
+ pub mod iface;
+ pub mod reach;
+ pub mod release;
++pub mod saved;
+ pub mod supplicant;
+ pub mod wlan;
+ 
+diff --git a/crates/skyward-net/src/saved.rs b/crates/skyward-net/src/saved.rs
+new file mode 100644
+index 0000000..f72c6fe
+--- /dev/null
++++ b/crates/skyward-net/src/saved.rs
+@@ -0,0 +1,200 @@
++//! Networks joined before, kept on the phone itself: the recovery reads
++//! them as its WLAN starts, to join one of them on its own, and writes one
++//! as it is joined. They live on the metadata partition, which a wipe of
++//! the data leaves alone and whose folder nothing else writes.
++
++use crate::supplicant::Security;
++use anyhow::{Context, Result};
++use std::fs;
++use std::os::unix::fs::PermissionsExt;
++use std::path::{Path, PathBuf};
++
++/// One network joined before: its name as the access point sends it, how
++/// it is protected, and the password its user typed, if it takes one.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Saved {
++    pub ssid: Vec<u8>,
++    pub security: Security,
++    pub password: String,
++}
++
++/// Where they are kept.
++pub fn folder() -> PathBuf {
++    Path::new("/metadata").join("skyward")
++}
++
++/// How a network is protected, in the file's own words.
++fn code(security: Security) -> &'static str {
++    match security {
++        Security::Open => "open",
++        Security::Owe => "owe",
++        Security::Psk => "psk",
++        Security::Sae => "sae",
++        Security::PskSae => "psksae",
++        Security::Wep | Security::Enterprise => "wep",
++    }
++}
++
++/// The protection a line's word names, where it is one of them.
++fn of_code(word: &str) -> Option<Security> {
++    Some(match word {
++        "open" => Security::Open,
++        "owe" => Security::Owe,
++        "psk" => Security::Psk,
++        "sae" => Security::Sae,
++        "psksae" => Security::PskSae,
++        "wep" => Security::Wep,
++        _ => return None,
++    })
++}
++
++/// The file itself.
++fn file(dir: &Path) -> PathBuf {
++    dir.join("wifi")
++}
++
++/// The networks the phone holds, a line each as `name protection
++/// password`, each of the three in hex, which takes any bytes of a name.
++/// A line that says nothing readable is passed over, for a file half
++/// written stays readable for the rest of it.
++pub fn load(dir: &Path) -> Result<Vec<Saved>> {
++    let text = fs::read_to_string(file(dir)).with_context(|| format!("read {}", file(dir).display()))?;
++    Ok(text
++        .lines()
++        .filter_map(|line| {
++            let fields = line.split(' ').collect::<Vec<_>>();
++            match fields.as_slice() {
++                [ssid, protection, password] => Some(Saved {
++                    ssid: hex::decode(ssid).ok()?,
++                    security: of_code(protection)?,
++                    password: String::from_utf8_lossy(&hex::decode(password).ok()?).into_owned(),
++                }),
++                _ => None,
++            }
++        })
++        .collect())
++}
++
++/// Write the networks, each its own line. The folder is closed to others,
++/// for a password is in it.
++pub fn save(dir: &Path, networks: &[Saved]) -> Result<()> {
++    fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
++    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).with_context(|| format!("close {}", dir.display()))?;
++    let mut text = String::new();
++    for network in networks {
++        text.push_str(&format!(
++            "{} {} {}\n",
++            hex::encode(&network.ssid),
++            code(network.security),
++            hex::encode(network.password.as_bytes())
++        ));
++    }
++    fs::write(file(dir), text).with_context(|| format!("write {}", file(dir).display()))?;
++    fs::set_permissions(file(dir), fs::Permissions::from_mode(0o600)).with_context(|| format!("close {}", file(dir).display()))
++}
++
++/// Keep `network`, in place of the one of the same name the phone held,
++/// or beside the others.
++pub fn remember(dir: &Path, network: Saved) -> Result<()> {
++    let mut held = load(dir).unwrap_or_default();
++    held.retain(|held| held.ssid != network.ssid);
++    held.push(network);
++    save(dir, &held)
++}
++
++/// Take the network of `ssid` from the ones the phone holds. Where the
++/// phone holds none at all, this is done already.
++pub fn forget(dir: &Path, ssid: &[u8]) -> Result<()> {
++    if !file(dir).exists() {
++        return Ok(());
++    }
++    let mut held = load(dir)?;
++    held.retain(|held| held.ssid != ssid);
++    save(dir, &held)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::process::Command;
++
++    /// A directory of one's own, empty to start.
++    fn tempdir(name: &str) -> PathBuf {
++        let dir = std::env::temp_dir().join(format!("skyward-saved-{}-{name}", std::process::id()));
++        let _ = fs::remove_dir_all(&dir);
++        fs::create_dir_all(&dir).unwrap();
++        dir
++    }
++
++    /// A network written comes back whole, name bytes of any kind and a
++    /// password with spaces in it and all.
++    #[test]
++    fn a_network_written_comes_back_whole() {
++        let dir = tempdir("round-trip");
++        let odd = Saved {
++            ssid: vec![0xC3, 0x28, 0x00, b'a'],
++            security: Security::Psk,
++            password: "the pass word".into(),
++        };
++        save(&dir, std::slice::from_ref(&odd)).unwrap();
++        assert_eq!(load(&dir).unwrap(), vec![odd]);
++        fs::remove_dir_all(&dir).unwrap();
++    }
++
++    /// A network of the same name takes the place of the one held, and
++    /// the others stay.
++    #[test]
++    fn a_network_of_the_same_name_takes_the_place_of_the_one_held() {
++        let dir = tempdir("remember");
++        let first = Saved { ssid: b"home".to_vec(), security: Security::PskSae, password: "1st".into() };
++        let second = Saved { ssid: b"work".to_vec(), security: Security::Open, password: String::new() };
++        remember(&dir, first.clone()).unwrap();
++        remember(&dir, second.clone()).unwrap();
++        let again = Saved { ssid: b"home".to_vec(), security: Security::Psk, password: "2nd".into() };
++        remember(&dir, again.clone()).unwrap();
++        assert_eq!(load(&dir).unwrap(), vec![second, again]);
++        fs::remove_dir_all(&dir).unwrap();
++    }
++
++    /// A file half written stays readable for the rest of it.
++    #[test]
++    fn a_line_that_says_nothing_readable_is_passed_over() {
++        let dir = tempdir("half-written");
++        let good = Saved { ssid: b"home".to_vec(), security: Security::Psk, password: "the password".into() };
++        save(&dir, std::slice::from_ref(&good)).unwrap();
++        let mut text = fs::read_to_string(file(&dir)).unwrap();
++        text.push_str("not a line of the file\nzz yy\n");
++        fs::write(file(&dir), text).unwrap();
++        assert_eq!(load(&dir).unwrap(), vec![good]);
++        fs::remove_dir_all(&dir).unwrap();
++    }
++
++    /// The file is closed to others, for a password is in it.
++    #[test]
++    fn the_file_is_closed_to_others() {
++        let dir = tempdir("closed");
++        save(&dir, &[Saved { ssid: b"home".to_vec(), security: Security::Open, password: String::new() }]).unwrap();
++        let said = Command::new("stat").arg("-c").arg("%a").arg(file(&dir)).output().unwrap();
++        assert_eq!(String::from_utf8_lossy(&said.stdout).trim(), "600");
++        fs::remove_dir_all(&dir).unwrap();
++    }
++
++    /// A network taken is gone, and the others stay; where the phone
++    /// holds none, the taking is done already.
++    #[test]
++    fn a_network_taken_is_gone_and_the_others_stay() {
++        let dir = tempdir("forget");
++        let home = Saved { ssid: b"home".to_vec(), security: Security::Psk, password: "the password".into() };
++        let work = Saved { ssid: b"work".to_vec(), security: Security::Open, password: String::new() };
++        save(&dir, &[home, work.clone()]).unwrap();
++        forget(&dir, b"home").unwrap();
++        assert_eq!(load(&dir).unwrap(), vec![work.clone()]);
++        forget(&dir, b"home").unwrap();
++        assert_eq!(load(&dir).unwrap(), vec![work.clone()]);
++        let empty = tempdir("forget-none");
++        forget(&empty, b"home").unwrap();
++        assert!(load(&empty).is_err(), "a phone that held none holds none still");
++        fs::remove_dir_all(&dir).unwrap();
++        fs::remove_dir_all(&empty).unwrap();
++    }
++}
+diff --git a/crates/skyward-net/src/supplicant.rs b/crates/skyward-net/src/supplicant.rs
+index 8b90fc5..9a48c19 100644
+--- a/crates/skyward-net/src/supplicant.rs
++++ b/crates/skyward-net/src/supplicant.rs
+@@ -142,50 +142,62 @@ pub fn unescape(text: &str) -> Result<Vec<u8>> {
+     Ok(out)
+ }
+ 
+-/// What sets up a network with id `id` to join it: its name, how it is
+-/// protected and its password. The name and a WPA3 password go as hex,
+-/// which takes any byte; a WPA2 password goes in quotes, which the
+-/// supplicant takes up to the last one, so a quote inside it stays. A
+-/// network `hidden`, which answers only a scan that names it, is scanned
+-/// for by name.
+-pub fn network_commands(id: u32, ssid: &[u8], security: Security, password: &str, hidden: bool) -> Result<Vec<String>> {
+-    let set = |name: &str, value: String| format!("SET_NETWORK {id} {name} {value}");
+-    let mut commands = vec![set("ssid", hex::encode(ssid))];
+-    if hidden {
+-        commands.push(set("scan_ssid", "1".into()));
+-    }
++/// The settings a network of this protection takes, as the pairs the
++/// supplicant reads the same way over the control interface and in its
++/// settings file.
++fn network_values(security: Security, password: &str) -> Result<Vec<(&'static str, String)>> {
+     let psk = || -> Result<String> {
+         ensure!((8..=63).contains(&password.len()), "a WPA2 password is 8 to 63 characters long");
+         ensure!(password.bytes().all(|b| (32..=126).contains(&b)), "a WPA2 password is printable ASCII");
+         Ok(format!("\"{password}\""))
+     };
+-    match security {
+-        Security::Open => commands.push(set("key_mgmt", "NONE".into())),
+-        Security::Owe => {
+-            commands.push(set("key_mgmt", "OWE".into()));
+-            commands.push(set("ieee80211w", "2".into()));
+-        }
+-        Security::Psk => {
+-            commands.push(set("key_mgmt", "WPA-PSK WPA-PSK-SHA256".into()));
+-            commands.push(set("psk", psk()?));
+-        }
++    Ok(match security {
++        Security::Open => vec![("key_mgmt", "NONE".into())],
++        Security::Owe => vec![("key_mgmt", "OWE".into()), ("ieee80211w", "2".into())],
++        Security::Psk => vec![("key_mgmt", "WPA-PSK WPA-PSK-SHA256".into()), ("psk", psk()?)],
+         Security::Sae => {
+             ensure!(!password.is_empty(), "a WPA3 password is not empty");
+-            commands.push(set("key_mgmt", "SAE".into()));
+-            commands.push(set("sae_password", hex::encode(password)));
+-            commands.push(set("ieee80211w", "2".into()));
+-        }
+-        Security::PskSae => {
+-            commands.push(set("key_mgmt", "WPA-PSK WPA-PSK-SHA256 SAE".into()));
+-            commands.push(set("psk", psk()?));
+-            commands.push(set("sae_password", hex::encode(password)));
+-            commands.push(set("ieee80211w", "1".into()));
++            vec![("key_mgmt", "SAE".into()), ("sae_password", hex::encode(password)), ("ieee80211w", "2".into())]
+         }
++        Security::PskSae => vec![
++            ("key_mgmt", "WPA-PSK WPA-PSK-SHA256 SAE".into()),
++            ("psk", psk()?),
++            ("sae_password", hex::encode(password)),
++            ("ieee80211w", "1".into()),
++        ],
+         Security::Wep | Security::Enterprise => bail!("the recovery does not join a network protected so"),
++    })
++}
++
++/// What sets up a network with id `id` to join it: its name, how it is
++/// protected and its password. The name and a WPA3 password go as hex,
++/// which takes any byte; a WPA2 password goes in quotes, which the
++/// supplicant takes up to the last one, so a quote inside it stays. A
++/// network `hidden`, which answers only a scan that names it, is scanned
++/// for by name.
++pub fn network_commands(id: u32, ssid: &[u8], security: Security, password: &str, hidden: bool) -> Result<Vec<String>> {
++    let mut commands = vec![format!("SET_NETWORK {id} ssid {}", hex::encode(ssid))];
++    if hidden {
++        commands.push(format!("SET_NETWORK {id} scan_ssid 1"));
++    }
++    for (name, value) in network_values(security, password)? {
++        commands.push(format!("SET_NETWORK {id} {name} {value}"));
+     }
+     Ok(commands)
+ }
+ 
++/// The same as a block of the settings file, where the networks joined
++/// before are put for the supplicant to join one of them on its own. The
++/// name is scanned for, which hidden networks answer.
++pub fn network_block(ssid: &[u8], security: Security, password: &str) -> Result<String> {
++    let mut block = format!("network={{\nssid={}\nscan_ssid=1\n", hex::encode(ssid));
++    for (name, value) in network_values(security, password)? {
++        block.push_str(&format!("{name}={value}\n"));
++    }
++    block.push_str("}\n");
++    Ok(block)
++}
++
+ /// What the supplicant tells a control connection attached to it.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum Event {
+@@ -341,6 +353,26 @@ mod control {
+ mod tests {
+     use super::*;
+ 
++    /// The settings of a network read from the file stand for the same
++    /// ones the control interface takes, whatever the protection.
++    #[test]
++    fn a_block_carries_what_the_commands_carry() {
++        for security in [Security::Open, Security::Owe, Security::Psk, Security::Sae, Security::PskSae] {
++            let block = network_block(b"home", security, "the password").expect("the password is one the supplicant takes");
++            assert!(block.starts_with("network={\n") && block.ends_with("}\n"));
++            for (name, value) in network_values(security, "the password").unwrap() {
++                assert!(block.contains(&format!("{name}={value}")), "no {name}={value} in the block:\n{block}");
++            }
++        }
++    }
++
++    /// A protection the recovery does not join makes no block either.
++    #[test]
++    fn a_network_protected_so_makes_no_block() {
++        assert!(network_block(b"home", Security::Wep, "").is_err());
++        assert!(network_block(b"home", Security::Enterprise, "").is_err());
++    }
++
+     #[test]
+     fn security_is_read_from_the_flags_a_scan_gives() {
+         let cases = [
+diff --git a/crates/skyward-pack/src/main.rs b/crates/skyward-pack/src/main.rs
+index a4b9a90..2facda4 100644
+--- a/crates/skyward-pack/src/main.rs
++++ b/crates/skyward-pack/src/main.rs
+@@ -68,6 +68,13 @@ enum Cmd {
+         /// The monospaced typeface's licence, which goes with it.
+         #[arg(long)]
+         mono_license: PathBuf,
++        /// A file to put in the ramdisk as it is, written as
++        /// host-path:ramdisk-path[:mode], the mode in octal. Programs and
++        /// libraries a recovery has to carry itself go this way, such as a
++        /// service directory of the version the phone's own services were
++        /// built against.
++        #[arg(long, value_name = "HOST:GUEST[:MODE]")]
++        extra: Vec<String>,
+         #[arg(long)]
+         out: PathBuf,
+     },
+@@ -125,7 +132,7 @@ fn main() -> Result<()> {
+             img.kernel = BootImage::read(&kernel)?.kernel;
+             write(&out, &img, &img.to_bytes()?)
+         }
+-        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, out } => {
++        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, extra, out } => {
+             let size = partition_size(&stock)?;
+             let mut img = BootImage::read(&stock)?;
+             let mut rd = Ramdisk::decode(&img.ramdisk)?;
+@@ -136,6 +143,24 @@ fn main() -> Result<()> {
+             }
+             let read = |p: &PathBuf| std::fs::read(p).with_context(|| format!("read {}", p.display()));
+             skyward_config::DeviceConfig::load(&config)?;
++            // A device configuration may name a path that depends on the
++            // version the phone's vendor image is, such as the folder the
++            // recovery keeps the service directories in. That version is
++            // read where the stock image's build properties give it, so the
++            // configuration and what is put beside it cannot drift apart.
++            let vendor_sdk = rd.find("prop.default").and_then(|entry| {
++                String::from_utf8_lossy(&entry.data)
++                    .lines()
++                    .find_map(|line| line.strip_prefix("ro.vendor.build.version.sdk="))
++                    .and_then(|version| version.trim().parse::<u32>().ok())
++            });
++            let mut written = read(&config)?;
++            if let Some(sdk) = vendor_sdk
++                && let Ok(text) = std::str::from_utf8(&written)
++                && text.contains("{sdk}")
++            {
++                written = text.replace("{sdk}", &sdk.to_string()).into_bytes();
++            }
+             rd.replace(paths::RECOVERY, read(&binary)?)?;
+             // Install scripts look for the commands a stock recovery lacks
+             // among its programs, and its unzip there too, a link to ziptool
+@@ -145,7 +170,7 @@ fn main() -> Result<()> {
+                 rd.link(command, recovery)?;
+             }
+             rd.add(paths::SYSTEM_INIT, 0o755, read(&system_init)?)?;
+-            rd.add(paths::CONFIG, 0o644, read(&config)?)?;
++            rd.add(paths::CONFIG, 0o644, written)?;
+             rd.add(paths::FONT, 0o644, read(&font)?)?;
+             rd.add(paths::MONO, 0o644, read(&mono)?)?;
+             rd.add(paths::MONO_LICENSE, 0o644, read(&mono_license)?)?;
+@@ -155,6 +180,18 @@ fn main() -> Result<()> {
+                 rd.add(paths::TASK_PROFILES, 0o644, TASK_PROFILES.to_vec())?;
+             }
+             rd.add(paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
++            for spec in &extra {
++                let (host, rest) = spec
++                    .split_once(':')
++                    .with_context(|| format!("{spec} is not host-path:ramdisk-path[:mode]"))?;
++                let (guest, mode) = match rest.rsplit_once(':') {
++                    Some((guest, mode)) => (guest, u32::from_str_radix(mode, 8).with_context(|| format!("{spec}: {mode} is not an octal mode"))?),
++                    None => (rest, 0o644),
++                };
++                ensure!(!guest.is_empty() && !guest.starts_with('/') && !guest.split('/').any(|c| c == ".."),
++                    "{spec}: {guest} is not a path from the top of the ramdisk");
++                rd.add(guest, mode, read(&PathBuf::from(host))?)?;
++            }
+             // On an unlocked device adbd keeps root when ro.secure is 0 and
+             // lets any computer in without authorization when ro.adb.secure is
+             // 0; init lets a later line of a property file override an earlier
+diff --git a/crates/skyward-programs/src/secure.rs b/crates/skyward-programs/src/secure.rs
+index 33d73a5..5b63bfd 100644
+--- a/crates/skyward-programs/src/secure.rs
++++ b/crates/skyward-programs/src/secure.rs
+@@ -145,8 +145,8 @@ enum Ready {
+ 
+ /// What to do, in order: start the listeners and the openers of the secure
+ /// world, the key service, the directory for hardware services where the
+-/// phone has services of the older kind, and the credential service; on a
+-/// phone with a weaver, start what the weaver reaches its secure element
++/// phone's own scripts name one, and the credential service; on a phone
++/// with a weaver, start what the weaver reaches its secure element
+ /// through, serving Android's secure element service where that is what it
+ /// goes through, and the weaver; and start the boot control.
+ pub fn steps(phone: &Phone) -> Result<Vec<Step>> {
+@@ -168,12 +168,14 @@ pub fn steps(phone: &Phone) -> Result<Vec<Step>> {
+ 
+     let (credentials, credentials_kind) = offered(phone, CREDENTIALS).context("the phone describes no credential service")?;
+     let (boot, boot_kind) = offered(phone, BOOT).context("the phone describes no boot control")?;
+-    if credentials_kind == Kind::Hidl || boot_kind == Kind::Hidl {
+-        let directory = phone
+-            .programs
+-            .iter()
+-            .find(|p| p.name == HARDWARE_DIRECTORY && phone.carries(p))
+-            .context("the phone has hardware services of the older kind, and no directory for them among the programs its scripts name")?;
++    // The directory of the older kind is started where the phone's scripts
++    // name one it carries. Android keeps the script of the one every phone
++    // has beside the rest of its framework, on the system partition, which
++    // a recovery does not read for the phone's programs: such a phone has
++    // the directory the recovery carries, started before these.
++    if (credentials_kind == Kind::Hidl || boot_kind == Kind::Hidl)
++        && let Some(directory) = phone.programs.iter().find(|p| p.name == HARDWARE_DIRECTORY && phone.carries(p))
++    {
+         start(&mut out, started(phone, directory, Ready::Property(HARDWARE_DIRECTORY_READY), Vec::new()));
+     }
+     let ready = |name: String, kind: Kind| match kind {
+diff --git a/crates/skyward-sys/src/ueventd.rs b/crates/skyward-sys/src/ueventd.rs
+index b46f2eb..8b27929 100644
+--- a/crates/skyward-sys/src/ueventd.rs
++++ b/crates/skyward-sys/src/ueventd.rs
+@@ -1,15 +1,18 @@
+ use std::collections::HashMap;
+ 
+ /// Where the phone keeps the rules for its own device nodes, and the names
+-/// its own partitions give to the accounts those rules name.
+-pub const RULE_FILES: [&str; 2] = ["/vendor/etc/ueventd.rc", "/odm/etc/ueventd.rc"];
++/// its own partitions give to the accounts those rules name. The rules are
++/// read from the top of a partition as well: a phone whose build puts them
++/// beside the partition's other folders rather than under `etc` keeps them
++/// where its own init reads them.
++pub const RULE_FILES: [&str; 4] = ["/vendor/ueventd.rc", "/vendor/etc/ueventd.rc", "/odm/ueventd.rc", "/odm/etc/ueventd.rc"];
+ pub const PASSWD_FILES: [&str; 2] = ["/vendor/etc/passwd", "/odm/etc/passwd"];
+ pub const GROUP_FILES: [&str; 2] = ["/vendor/etc/group", "/odm/etc/group"];
+ 
+ /// The accounts Android fixes once and for all. The rules, and the init
+ /// scripts of the phone's own programs, name them rather than their
+ /// numbers, and a recovery has no list of its own to look them up in.
+-const ACCOUNTS: [(&str, u32); 33] = [
++const ACCOUNTS: [(&str, u32); 39] = [
+     ("root", 0),
+     ("system", 1000),
+     ("radio", 1001),
+@@ -42,6 +45,12 @@ const ACCOUNTS: [(&str, u32); 33] = [
+     ("readproc", 3009),
+     ("wakelock", 3010),
+     ("uhid", 3011),
++    ("net_bt_admin", 3001),
++    ("net_bt", 3002),
++    ("inet", 3003),
++    ("net_raw", 3004),
++    ("net_bw_stats", 3006),
++    ("net_bw_acct", 3007),
+     ("nobody", 9999),
+ ];
+ 
+diff --git a/crates/skyward-ui/locales/de.toml b/crates/skyward-ui/locales/de.toml
+index 6d71e4f..f75c782 100644
+--- a/crates/skyward-ui/locales/de.toml
++++ b/crates/skyward-ui/locales/de.toml
+@@ -418,6 +418,7 @@ ip_address = "IP-Adresse"
+ subnet_mask = "Subnetzmaske"
+ router = "Router"
+ forget = "Netzwerk entfernen"
++saved = "Gespeicherte Netzwerke"
+ generation = "Wi-Fi {n}"
+ off = "Aus"
+ turning_on = "Wird eingeschaltet"
+diff --git a/crates/skyward-ui/locales/en.toml b/crates/skyward-ui/locales/en.toml
+index a284abb..b9d80fa 100644
+--- a/crates/skyward-ui/locales/en.toml
++++ b/crates/skyward-ui/locales/en.toml
+@@ -481,6 +481,7 @@ ip_address = "IP address"
+ subnet_mask = "Subnet mask"
+ router = "Router"
+ forget = "Forget network"
++saved = "Saved networks"
+ generation = "Wi-Fi {n}"
+ # What the home page says beside its WLAN entry.
+ off = "Off"
+diff --git a/crates/skyward-ui/locales/es.toml b/crates/skyward-ui/locales/es.toml
+index 01b74b4..581d722 100644
+--- a/crates/skyward-ui/locales/es.toml
++++ b/crates/skyward-ui/locales/es.toml
+@@ -421,6 +421,7 @@ ip_address = "Dirección IP"
+ subnet_mask = "Máscara de subred"
+ router = "Router"
+ forget = "Olvidar red"
++saved = "Redes guardadas"
+ generation = "Wi-Fi {n}"
+ off = "Desactivado"
+ turning_on = "Activando"
+diff --git a/crates/skyward-ui/locales/fr.toml b/crates/skyward-ui/locales/fr.toml
+index c52c77b..d560ffe 100644
+--- a/crates/skyward-ui/locales/fr.toml
++++ b/crates/skyward-ui/locales/fr.toml
+@@ -421,6 +421,7 @@ ip_address = "Adresse IP"
+ subnet_mask = "Masque de sous-réseau"
+ router = "Routeur"
+ forget = "Oublier le réseau"
++saved = "Réseaux enregistrés"
+ generation = "Wi-Fi {n}"
+ off = "Désactivé"
+ turning_on = "Activation"
+diff --git a/crates/skyward-ui/locales/id.toml b/crates/skyward-ui/locales/id.toml
+index 46c7fca..a4063e7 100644
+--- a/crates/skyward-ui/locales/id.toml
++++ b/crates/skyward-ui/locales/id.toml
+@@ -415,6 +415,7 @@ ip_address = "Alamat IP"
+ subnet_mask = "Subnet mask"
+ router = "Router"
+ forget = "Lupakan jaringan"
++saved = "Jaringan tersimpan"
+ generation = "Wi-Fi {n}"
+ off = "Nonaktif"
+ turning_on = "Mengaktifkan"
+diff --git a/crates/skyward-ui/locales/it.toml b/crates/skyward-ui/locales/it.toml
+index 2d1fa41..61c4776 100644
+--- a/crates/skyward-ui/locales/it.toml
++++ b/crates/skyward-ui/locales/it.toml
+@@ -421,6 +421,7 @@ ip_address = "Indirizzo IP"
+ subnet_mask = "Maschera di sottorete"
+ router = "Router"
+ forget = "Elimina rete"
++saved = "Reti salvate"
+ generation = "Wi-Fi {n}"
+ off = "Disattivato"
+ turning_on = "Attivazione in corso"
+diff --git a/crates/skyward-ui/locales/ja.toml b/crates/skyward-ui/locales/ja.toml
+index 9f72bef..c0d5d26 100644
+--- a/crates/skyward-ui/locales/ja.toml
++++ b/crates/skyward-ui/locales/ja.toml
+@@ -415,6 +415,7 @@ ip_address = "IP アドレス"
+ subnet_mask = "サブネットマスク"
+ router = "ルーター"
+ forget = "ネットワークを削除"
++saved = "保存済みのネットワーク"
+ generation = "Wi-Fi {n}"
+ off = "オフ"
+ turning_on = "オンにしています"
+diff --git a/crates/skyward-ui/locales/pl.toml b/crates/skyward-ui/locales/pl.toml
+index 0dd4256..b684948 100644
+--- a/crates/skyward-ui/locales/pl.toml
++++ b/crates/skyward-ui/locales/pl.toml
+@@ -424,6 +424,7 @@ ip_address = "Adres IP"
+ subnet_mask = "Maska podsieci"
+ router = "Router"
+ forget = "Zapomnij sieć"
++saved = "Zapisane sieci"
+ generation = "Wi-Fi {n}"
+ off = "Wyłączone"
+ turning_on = "Włączanie"
+diff --git a/crates/skyward-ui/locales/pt-BR.toml b/crates/skyward-ui/locales/pt-BR.toml
+index a86ac17..4810d25 100644
+--- a/crates/skyward-ui/locales/pt-BR.toml
++++ b/crates/skyward-ui/locales/pt-BR.toml
+@@ -421,6 +421,7 @@ ip_address = "Endereço IP"
+ subnet_mask = "Máscara de sub-rede"
+ router = "Roteador"
+ forget = "Esquecer rede"
++saved = "Redes salvas"
+ generation = "Wi-Fi {n}"
+ off = "Desativado"
+ turning_on = "Ativando"
+diff --git a/crates/skyward-ui/locales/ru.toml b/crates/skyward-ui/locales/ru.toml
+index 2dd8f4d..844e45a 100644
+--- a/crates/skyward-ui/locales/ru.toml
++++ b/crates/skyward-ui/locales/ru.toml
+@@ -424,6 +424,7 @@ ip_address = "IP-адрес"
+ subnet_mask = "Маска подсети"
+ router = "Маршрутизатор"
+ forget = "Удалить сеть"
++saved = "Сохранённые сети"
+ generation = "Wi-Fi {n}"
+ off = "Выключен"
+ turning_on = "Включение"
+diff --git a/crates/skyward-ui/locales/tr.toml b/crates/skyward-ui/locales/tr.toml
+index f9f9275..c5544ae 100644
+--- a/crates/skyward-ui/locales/tr.toml
++++ b/crates/skyward-ui/locales/tr.toml
+@@ -418,6 +418,7 @@ ip_address = "IP adresi"
+ subnet_mask = "Alt ağ maskesi"
+ router = "Yönlendirici"
+ forget = "Ağı unut"
++saved = "Kayıtlı ağlar"
+ generation = "Wi-Fi {n}"
+ off = "Kapalı"
+ turning_on = "Açılıyor"
+diff --git a/crates/skyward-ui/locales/uk.toml b/crates/skyward-ui/locales/uk.toml
+index 0a54822..2c69b7b 100644
+--- a/crates/skyward-ui/locales/uk.toml
++++ b/crates/skyward-ui/locales/uk.toml
+@@ -424,6 +424,7 @@ ip_address = "IP-адреса"
+ subnet_mask = "Маска підмережі"
+ router = "Маршрутизатор"
+ forget = "Забути мережу"
++saved = "Збережені мережі"
+ generation = "Wi-Fi {n}"
+ off = "Вимкнено"
+ turning_on = "Увімкнення"
+diff --git a/crates/skyward-ui/locales/vi.toml b/crates/skyward-ui/locales/vi.toml
+index 9fdec82..e74cdd5 100644
+--- a/crates/skyward-ui/locales/vi.toml
++++ b/crates/skyward-ui/locales/vi.toml
+@@ -418,6 +418,7 @@ ip_address = "Địa chỉ IP"
+ subnet_mask = "Mặt nạ mạng con"
+ router = "Bộ định tuyến"
+ forget = "Quên mạng"
++saved = "Mạng đã lưu"
+ generation = "Wi-Fi {n}"
+ off = "Tắt"
+ turning_on = "Đang bật"
+diff --git a/crates/skyward-ui/locales/zh-Hans.toml b/crates/skyward-ui/locales/zh-Hans.toml
+index 6695b0d..cccf315 100644
+--- a/crates/skyward-ui/locales/zh-Hans.toml
++++ b/crates/skyward-ui/locales/zh-Hans.toml
+@@ -415,6 +415,7 @@ ip_address = "IP 地址"
+ subnet_mask = "子网掩码"
+ router = "路由器"
+ forget = "删除网络"
++saved = "已保存的 WLAN"
+ generation = "第{n}代"
+ off = "已关闭"
+ turning_on = "正在开启"
+diff --git a/crates/skyward-ui/locales/zh-Hant.toml b/crates/skyward-ui/locales/zh-Hant.toml
+index 14b4f8f..ca1d732 100644
+--- a/crates/skyward-ui/locales/zh-Hant.toml
++++ b/crates/skyward-ui/locales/zh-Hant.toml
+@@ -415,6 +415,7 @@ ip_address = "IP 位址"
+ subnet_mask = "子網路遮罩"
+ router = "路由器"
+ forget = "刪除網路"
++saved = "已儲存的 Wi-Fi 網路"
+ generation = "第{n}代"
+ off = "已關閉"
+ turning_on = "正在開啟"
+diff --git a/crates/skyward-ui/src/app/act.rs b/crates/skyward-ui/src/app/act.rs
+index ab776c0..76612c8 100644
+--- a/crates/skyward-ui/src/app/act.rs
++++ b/crates/skyward-ui/src/app/act.rs
+@@ -8,6 +8,11 @@ impl App {
+         let l = self.state.lang;
+         match action {
+             Action::Open(s) => {
++                // The section of the networks the phone holds reads what
++                // the store keeps as the page comes up.
++                if s == Screen::Wlan {
++                    self.refresh_saved();
++                }
+                 if s == Screen::Search && self.screen() == Screen::Home {
+                     // The bar moves up from where it stands unfolded: a
+                     // page easing there for the keys gets there at once.
+@@ -408,9 +413,17 @@ impl App {
+                     return self.act(Action::OpenJoined, now);
+                 }
+                 match network.security {
+-                    Security::Wep => self.say(l.pick(texts::toast::WEP_UNSUPPORTED), now),
+-                    Security::Enterprise => self.say(l.pick(texts::toast::ENTERPRISE_UNSUPPORTED), now),
+-                    s if s.password() => self.ask_password(network),
++                        Security::Wep => self.say(l.pick(texts::toast::WEP_UNSUPPORTED), now),
++                        Security::Enterprise => self.say(l.pick(texts::toast::ENTERPRISE_UNSUPPORTED), now),
++                        // A network the phone holds is joined with what it
++                        // holds for it, without asking again for what is
++                        // already known.
++                        s if s.password() => match self.held(&network.ssid) {
++                            Some(held) => {
++                                return vec![Effect::JoinWlan { ssid: network.ssid, name: network.name, security: held.security, password: Secret(held.password) }];
++                            }
++                            None => self.ask_password(network),
++                        },
+                     _ => {
+                         return vec![Effect::JoinWlan {
+                             ssid: network.ssid,
+@@ -427,6 +440,48 @@ impl App {
+                 self.state.details = Some(network);
+                 self.open(Screen::WlanNetwork);
+             }
++            Action::JoinSaved(i) => {
++                let Some(held) = self.state.saved.get(i).cloned() else { return Vec::new() };
++                let w = self.state.wlan.as_ref().expect("saved networks show on a phone whose WLAN is brought up");
++                if w.joined.as_ref().is_some_and(|j| j.ssid == held.ssid) {
++                    return self.act(Action::OpenJoined, now);
++                }
++                let Some(found) = w.networks.iter().find(|n| n.ssid == held.ssid) else {
++                    // Where the scan no longer answers it, its details are
++                    // what is shown.
++                    let name = String::from_utf8_lossy(&held.ssid).into_owned();
++                    self.state.details = Some(Network {
++                        ssid: held.ssid,
++                        name,
++                        signal: 0,
++                        frequency: 0,
++                        bands: Default::default(),
++                        security: held.security,
++                    });
++                    self.open(Screen::WlanNetwork);
++                    return Vec::new();
++                };
++                // In range, it is joined with what the phone holds, the way
++                // a nearby row the phone holds is joined; what is held says
++                // how it was joined before.
++                let password = if held.security.password() { held.password } else { String::new() };
++                return vec![Effect::JoinWlan { ssid: found.ssid.clone(), name: found.name.clone(), security: held.security, password: Secret(password) }];
++            }
++            Action::SavedDetails(i) => {
++                let Some(held) = self.state.saved.get(i).cloned() else { return Vec::new() };
++                let w = self.state.wlan.as_ref().expect("saved networks show on a phone whose WLAN is brought up");
++                let name = String::from_utf8_lossy(&held.ssid).into_owned();
++                let network = w.networks.iter().find(|n| n.ssid == held.ssid).cloned().unwrap_or(Network {
++                    ssid: held.ssid,
++                    name,
++                    signal: 0,
++                    frequency: 0,
++                    bands: Default::default(),
++                    security: held.security,
++                });
++                self.state.details = Some(network);
++                self.open(Screen::WlanNetwork);
++            }
+             Action::OpenJoined => {
+                 let w = self.state.wlan.as_ref().expect("a network is chosen on a phone whose WLAN is brought up");
+                 let Some(j) = w.joined.clone() else { return Vec::new() };
+@@ -448,8 +503,12 @@ impl App {
+                 }
+             }
+             Action::LeaveNetwork => {
++                // Deleting takes the network from the ones the phone
++                // holds, so that it is not joined again on its own.
++                let Some(network) = self.state.details.clone() else { return Vec::new() };
++                self.state.saved.retain(|held| held.ssid != network.ssid);
+                 let mut fx = self.back(now);
+-                fx.push(Effect::LeaveWlan);
++                fx.push(Effect::ForgetWlan { ssid: network.ssid });
+                 return fx;
+             }
+             Action::Rescan => return vec![Effect::ScanWlan],
+diff --git a/crates/skyward-ui/src/app/input.rs b/crates/skyward-ui/src/app/input.rs
+index 66d7f07..c14641a 100644
+--- a/crates/skyward-ui/src/app/input.rs
++++ b/crates/skyward-ui/src/app/input.rs
+@@ -106,6 +106,12 @@ impl App {
+                         .map(|h| (h.action, h.rect))
+                 };
+                 let action = hit.map(|h| h.0);
++                // A control that itself sits against the edge is pressed, not
++                // swiped from: the on-screen keyboard's leftmost key starts a
++                // few dp in, and a finger on it that drifts sideways was being
++                // turned into a swipe back and lost, which reads as a key that
++                // does not always answer.
++                let at_edge = at_edge.filter(|_| hit.is_none_or(|(_, r)| r.x > m.dp(4.0)));
+                 // A row of the page darkens behind its words a moment after
+                 // the finger lands on it, if the finger stays.
+                 let row = hit
+diff --git a/crates/skyward-ui/src/app/mod.rs b/crates/skyward-ui/src/app/mod.rs
+index 5aa0adf..45e684e 100644
+--- a/crates/skyward-ui/src/app/mod.rs
++++ b/crates/skyward-ui/src/app/mod.rs
+@@ -28,6 +28,7 @@ use skyward_install::{Event, ImageKind, Outcome, Place as FlashPlace, Reflash, R
+ use skyward_net::download::{Failure, Progress};
+ use skyward_net::github::{Build, Newest};
+ use skyward_net::release::{Release, Unanswered};
++use skyward_net::saved::Saved;
+ use skyward_net::supplicant::Security;
+ use skyward_net::wlan::{Joined, Network, Power, Stage as Joining, Traffic, Wlan};
+ use skyward_systems::{Overview, Who};
+@@ -351,9 +352,15 @@ pub enum Action {
+     /// Join the network at this place in the list of those in range, or
+     /// open the page of the one joined.
+     JoinNetwork(usize),
++    /// Join the network the phone holds at this place in the section of
++    /// them, where it still answers a scan; its details otherwise.
++    JoinSaved(usize),
+     /// Open the details of the network at this place in the list of those
+     /// in range.
+     NetworkDetails(usize),
++    /// Open the details of the network the phone holds at this place in
++    /// the section of them.
++    SavedDetails(usize),
+     /// The network chosen: its password again once refused, its details
+     /// otherwise.
+     OpenJoined,
+@@ -575,6 +582,9 @@ pub enum Effect {
+     ScanWlan,
+     JoinWlan { ssid: Vec<u8>, name: String, security: Security, password: Secret },
+     LeaveWlan,
++    /// Take a network from the ones the phone holds, so that it is not
++    /// joined again on its own.
++    ForgetWlan { ssid: Vec<u8> },
+     /// Ask the update server for the newest system, telling what it
+     /// answered with [`App::update_checked`].
+     CheckUpdate,
+diff --git a/crates/skyward-ui/src/app/state.rs b/crates/skyward-ui/src/app/state.rs
+index 71677b7..d761bc8 100644
+--- a/crates/skyward-ui/src/app/state.rs
++++ b/crates/skyward-ui/src/app/state.rs
+@@ -174,6 +174,9 @@ pub struct State {
+     pub joining: Option<Network>,
+     /// The network the details page is of, as it was found.
+     pub details: Option<Network>,
++    /// The networks the phone holds, as the store last said, for the WLAN
++    /// page's section of them.
++    pub saved: Vec<Saved>,
+     /// The network the page that adds one is adding.
+     pub adding: Option<Adding>,
+     /// The password typed on the password page or the page that adds a
+@@ -271,6 +274,7 @@ impl Default for State {
+             wlan: None,
+             joining: None,
+             details: None,
++            saved: Vec::new(),
+             adding: None,
+             password: String::new(),
+             show_password: false,
+diff --git a/crates/skyward-ui/src/app/wlan.rs b/crates/skyward-ui/src/app/wlan.rs
+index efe3e54..452f132 100644
+--- a/crates/skyward-ui/src/app/wlan.rs
++++ b/crates/skyward-ui/src/app/wlan.rs
+@@ -54,7 +54,17 @@ impl App {
+         if self.state.wlan.as_ref() == Some(&w) {
+             return;
+         }
++        // What the runtime keeps is written on the phone as a network
++        // comes to hold keys with it: what the phone holds is read again
++        // where the one joined has come that far, or is another one.
++        let was = self.state.wlan.as_ref().and_then(|w| {
++            w.joined.as_ref().map(|j| (j.ssid.clone(), matches!(j.stage, Joining::Connected(_))))
++        });
++        let come = w.joined.as_ref().map(|j| (j.ssid.clone(), matches!(j.stage, Joining::Connected(_))));
+         self.state.wlan = Some(w);
++        if come.is_some_and(|(ssid, on)| on && was.is_none_or(|(old, done)| !done || old != ssid)) {
++            self.refresh_saved();
++        }
+         if matches!(self.screen(), Screen::Home | Screen::Wlan | Screen::WlanNetwork | Screen::Update | Screen::SkywardUpdate) {
+             self.refresh();
+         }
+@@ -88,6 +98,21 @@ impl App {
+         self.state.layer = Layer::Letters;
+         self.open(Screen::WlanPassword);
+     }
++
++    /// The network the phone holds for `ssid`, where it holds one: a
++    /// network joined before, read from where it is kept.
++    pub(super) fn held(&self, ssid: &[u8]) -> Option<skyward_net::saved::Saved> {
++        skyward_net::saved::load(&skyward_net::saved::folder())
++            .ok()?
++            .into_iter()
++            .find(|held| held.ssid == ssid)
++    }
++
++    /// What the phone holds, as the store last said, for the WLAN page's
++    /// section of them.
++    pub(super) fn refresh_saved(&mut self) {
++        self.state.saved = skyward_net::saved::load(&skyward_net::saved::folder()).unwrap_or_default();
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -136,7 +161,9 @@ mod tests {
+         assert_eq!(fmt::wlan_value(Lang::Hans, app.state.wlan.as_ref().unwrap()), "Skyward");
+         tap(&mut app, &f, &i, Action::OpenJoined);
+         assert_eq!(app.screen(), Screen::WlanNetwork);
+-        assert_eq!(tap(&mut app, &f, &i, Action::LeaveNetwork), vec![Effect::LeaveWlan]);
++        let forgotten = Effect::ForgetWlan { ssid: b"Skyward".to_vec() };
++        assert_eq!(format!("{forgotten:?}"), r#"ForgetWlan { ssid: [83, 107, 121, 119, 97, 114, 100] }"#);
++        assert_eq!(tap(&mut app, &f, &i, Action::LeaveNetwork), vec![forgotten]);
+         assert_eq!(app.screen(), Screen::Wlan);
+         assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::Wlan)), vec![Effect::Wlan(false)]);
+         assert_eq!(app.state.wlan, Some(Wlan::default()));
+@@ -310,6 +337,52 @@ mod tests {
+         assert_eq!(app.state.adding.as_ref().unwrap().security, Security::Sae);
+     }
+ 
++    #[test]
++    fn the_networks_the_phone_holds_join_from_their_section_and_show_their_details() {
++        let (f, i) = (fonts(), info());
++        let mut app = App::new(Screen::Home, W, H, PPD);
++        let nearby = vec![network("Skyward", -34, Security::Psk), network("Far", -80, Security::Open)];
++        app.state.wlan = Some(Wlan { power: Power::On, networks: nearby, joined: None });
++        app.act(Action::Open(Screen::Wlan), 0);
++        // Opening the page reads what the store keeps; the store stands
++        // where no test has written it, so the section is filled by hand.
++        app.state.saved = vec![
++            skyward_net::saved::Saved { ssid: b"Skyward".to_vec(), security: Security::Psk, password: "secret12".into() },
++            skyward_net::saved::Saved { ssid: b"Away".to_vec(), security: Security::Psk, password: "away-pass".into() },
++        ];
++        app.refresh();
++        let fr = app.frame(&f, &i);
++        assert!(fr.hits.iter().any(|h| h.action == Action::JoinSaved(0)), "the section shows what the phone holds");
++        assert!(fr.hits.iter().any(|h| h.action == Action::SavedDetails(1)), "each row opens the details of its own");
++        // One that still answers a scan is joined with what is held, the
++        // way a nearby one is.
++        let join = Effect::JoinWlan { ssid: b"Skyward".to_vec(), name: "Skyward".into(), security: Security::Psk, password: Secret("secret12".into()) };
++        assert_eq!(tap(&mut app, &f, &i, Action::JoinSaved(0)), vec![join]);
++        // One that does not is told of by its details, which take it away.
++        assert!(tap(&mut app, &f, &i, Action::JoinSaved(1)).is_empty());
++        assert_eq!(app.screen(), Screen::WlanNetwork);
++        assert_eq!(app.state.details.as_ref().map(|n| n.name.as_str()), Some("Away"));
++        assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::LeaveNetwork), "what the phone holds can be taken from there");
++        let forgotten = Effect::ForgetWlan { ssid: b"Away".to_vec() };
++        assert_eq!(tap(&mut app, &f, &i, Action::LeaveNetwork), vec![forgotten]);
++        assert_eq!(app.state.saved.len(), 1, "what is deleted is no longer held");
++        assert_eq!(app.screen(), Screen::Wlan);
++        // The details of one in range are the ones of the scan.
++        tap(&mut app, &f, &i, Action::SavedDetails(0));
++        assert_eq!(app.state.details.as_ref().map(|n| n.name.as_str()), Some("Skyward"));
++        app.key(Key::Back, 0);
++        // Nothing is shown of the one joined in the section of them: it
++        // stands in the card of its own.
++        app.set_wlan(connected("Skyward"));
++        app.state.saved =
++            vec![skyward_net::saved::Saved { ssid: b"Skyward".to_vec(), security: Security::Psk, password: "secret12".into() }];
++        app.refresh();
++        assert!(
++            !app.frame(&f, &i).hits.iter().any(|h| matches!(h.action, Action::JoinSaved(_) | Action::SavedDetails(_))),
++            "the one joined stands in the card of its own"
++        );
++    }
++
+     #[test]
+     fn a_networks_round_button_opens_its_details_and_its_row_joins_it() {
+         let (f, i) = (fonts(), info());
+diff --git a/crates/skyward-ui/src/pages.rs b/crates/skyward-ui/src/pages.rs
+index fee3424..4e3916e 100644
+--- a/crates/skyward-ui/src/pages.rs
++++ b/crates/skyward-ui/src/pages.rs
+@@ -21,6 +21,7 @@ use crate::widgets::{self, Caption, Detail, Fact, Outline, Row, Spec, SystemCard
+ use skyward_info::{DeviceInfo, VERSION};
+ use skyward_install::{Outcome, Place as FlashPlace, Reflash, Refusal, Stage};
+ use skyward_net::download::Progress;
++use skyward_net::saved::Saved;
+ use skyward_net::supplicant::Security;
+ use skyward_net::wlan::{Bands, Network, Power, Stage as Joining};
+ use skyward_systems::{Held, Who};
+@@ -2491,6 +2492,42 @@ pub fn wlan(cx: &Ctx) -> Frame {
+                     y = widgets::footnote(&mut c, t, f, y, &note);
+                 }
+             }
++            // What the phone holds stands under the one chosen, as the
++            // stock page stands its saved networks: each joined with what
++            // is held where it still answers a scan, and told of where it
++            // does not.
++            let joined_ssid = w.joined.as_ref().map(|j| &j.ssid);
++            let held: Vec<&Saved> = s.saved.iter().filter(|h| joined_ssid.is_none_or(|ssid| ssid != &h.ssid)).collect();
++            if !held.is_empty() {
++                y = widgets::section(&mut c, t, f, y, l.pick(texts::wlan::SAVED));
++                let names: Vec<String> = held.iter().map(|h| String::from_utf8_lossy(&h.ssid).into_owned()).collect();
++                let tags: Vec<Option<String>> = held
++                    .iter()
++                    .map(|h| w.networks.iter().find(|n| n.ssid == h.ssid).and_then(|n| fmt::band_tag(n.bands)))
++                    .collect();
++                let rows: Vec<Row> = held
++                    .iter()
++                    .zip(&names)
++                    .zip(&tags)
++                    .map(|((h, name), tag)| {
++                        let found = w.networks.iter().find(|n| n.ssid == h.ssid);
++                        let row = Row::new(name)
++                            .fan(found.map_or(0, |n| fmt::signal_level(n.signal)))
++                            .trail(Trail::Network { locked: !matches!(h.security, Security::Open | Security::Owe) });
++                        match tag {
++                            Some(tag) => row.tag(tag),
++                            None => row,
++                        }
++                    })
++                    .collect();
++                let kept = widgets::list(&mut c, t, f, y, &rows);
++                let picks: Vec<Action> = (0..held.len()).map(Action::JoinSaved).collect();
++                out.extend(hits(&kept.rows, &picks));
++                for (k, rect) in kept.rows.iter().enumerate() {
++                    out.push(Hit { rect: widgets::round_button(t, *rect), action: Action::SavedDetails(k) });
++                }
++                y = kept.bottom;
++            }
+             let others: Vec<(usize, &Network)> =
+                 w.networks.iter().enumerate().filter(|(_, n)| w.joined.as_ref().is_none_or(|j| j.ssid != n.ssid)).collect();
+             let (below, rescan) = widgets::section_action(&mut c, t, f, y, l.pick(texts::wlan::NEARBY), l.pick(texts::wlan::REFRESH));
+@@ -2608,13 +2645,24 @@ pub fn wlan_network(cx: &Ctx) -> Frame {
+     let signal = l.pick(texts::wlan::SIGNAL_STRENGTH);
+     let title = l.pick(texts::wlan::DETAILS);
+     let Some(j) = joined else {
+-        let items = [
+-            detail(Outline::Wifi, l.pick(texts::wlan::BANDS), fmt::bands(l, network.bands)),
+-            detail(Outline::Signal, signal, fmt::signal(l, network.signal).to_string()),
+-            security,
+-        ];
++            // The rows of a scan speak of where the network stands: a network
++            // the scan no longer answers, or never did, is told of by its
++            // protection alone. What the phone holds is what its page takes
++            // away.
++            let scanned = s.wlan.as_ref().is_some_and(|w| w.networks.iter().any(|n| n.ssid == network.ssid));
++            let mut items = Vec::new();
++            if scanned {
++                items.push(detail(Outline::Wifi, l.pick(texts::wlan::BANDS), fmt::bands(l, network.bands)));
++                items.push(detail(Outline::Signal, signal, fmt::signal(l, network.signal).to_string()));
++            }
++            items.push(security);
+         let y = widgets::detail_grid(&mut c, t, f, y, &items);
+-        return Frame::new(t, fit(c, t, y), out, title, top);
++        if !s.saved.iter().any(|h| h.ssid == network.ssid) {
++            return Frame::new(t, fit(c, t, y), out, title, top);
++        }
++        let forget = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(l.pick(texts::wlan::FORGET)).tint(t.pal.danger).trail(Trail::None)]);
++        out.extend(hits(&forget.rows, &[Action::LeaveNetwork]));
++        return Frame::new(t, fit(c, t, forget.bottom), out, title, top);
+     };
+     let mut items = vec![detail(Outline::Info, l.pick(texts::wlan::STATUS), fmt::joining(l, &j.stage).to_string())];
+     match &j.stage {
+diff --git a/crates/skyward-ui/src/surface.rs b/crates/skyward-ui/src/surface.rs
+index ab27c29..db4c9e0 100644
+--- a/crates/skyward-ui/src/surface.rs
++++ b/crates/skyward-ui/src/surface.rs
+@@ -781,9 +781,15 @@ pub mod kms {
+             self.settle()?;
+             let mut req = atomic::AtomicModeReq::new();
+             req.add_property(self.conn, id, property::Value::UnsignedRange(rest));
+-            self.card.atomic_commit(AtomicCommitFlags::empty(), req).context("rest the panel")?;
+-            self.power = Power::Resting;
+-            Ok(())
++            match self.card.atomic_commit(AtomicCommitFlags::empty(), req) {
++                Ok(()) => {
++                    self.power = Power::Resting;
++                    Ok(())
++                }
++                // A driver that will not rest the panel is asked to turn it
++                // off instead: resting only makes the way back on shorter.
++                Err(_) => self.turn_off(),
++            }
+         }
+ 
+         /// Turn the display off: the panel and the display processor feeding
+@@ -909,7 +915,14 @@ pub mod kms {
+ 
+         fn settle(&mut self) -> Result<()> {
+             if self.flipping {
+-                flipped(&self.card).context("flip")?;
++                // An event that does not come is not waited on for ever:
++                // some display drivers send none for a commit that leaves
++                // the display off, and the frames after it are still drawn
++                // and still reach the panel. Saying so and going on keeps
++                // the screen answering; stopping there leaves it black.
++                if let Err(e) = flipped(&self.card) {
++                    eprintln!("display: {e:#}");
++                }
+                 self.flipping = false;
+             }
+             Ok(())
+diff --git a/crates/skyward/src/haptics.rs b/crates/skyward/src/haptics.rs
+index 43e241f..e7223e2 100644
+--- a/crates/skyward/src/haptics.rs
++++ b/crates/skyward/src/haptics.rs
+@@ -18,6 +18,10 @@ const FF_CUSTOM: u16 = 0x5d;
+ /// full, whatever the slider says: the 17 Ultra's own system plays them at
+ /// 3527 mV of the 8500 mV its device tree gives.
+ const TICKS_STRENGTH: f32 = 0.415;
++/// The least of its drive some drivers take an effect at: this phone's own
++/// turns every lighter one down, its converter not running below half. A
++/// click lighter than that plays at the least the driver takes.
++const HALF_DRIVE: f32 = 0.5;
+ /// How long the ticks stay loaded once their samples have run out, as the
+ /// phone's own system leaves them: the motor comes to rest on its own
+ /// before taking them away brakes it.
+@@ -93,7 +97,16 @@ impl Haptics {
+             erase(&self.dev, slot).context("take away the click still playing")?;
+         }
+         let effect = if ticks { &self.ticks } else { &self.click };
+-        let loaded = upload(&self.dev, effect, share, self.scale_samples).context("load the click")?;
++            let loaded = match upload(&self.dev, effect, share, self.scale_samples) {
++                Ok(loaded) => loaded,
++                // A driver that takes no effect lighter than half its drive
++                // turns the lighter ones down rather than playing them weakly:
++                // the click plays at the least it takes, which is what its own
++                // system's lightest click is.
++                Err(e) if share < HALF_DRIVE => upload(&self.dev, effect, HALF_DRIVE, self.scale_samples)
++                    .with_context(|| format!("load the click at the least its driver takes: {e:#}"))?,
++                Err(e) => return Err(e).context("load the click"),
++            };
+         play(&mut self.dev, loaded.slot).context("play the click")?;
+         self.clicks += 1;
+         let this = (loaded.slot, self.clicks);
+diff --git a/crates/skyward/src/input.rs b/crates/skyward/src/input.rs
+index 4a9d65c..c4f88f4 100644
+--- a/crates/skyward/src/input.rs
++++ b/crates/skyward/src/input.rs
+@@ -244,8 +244,13 @@ impl Inputs {
+                 self.wakeful.add(dev.as_raw_fd())?;
+                 self.panel = Some(Panel::new(path, dev)?);
+                 for w in &self.touch_writes {
+-                    fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
+-                    skyward_sys::kmsg(&format!("wrote {} to {} for the touchscreen", w.value, w.path))?;
++                    // A build that keeps no such file, or keeps it somewhere
++                    // else, still has a panel to drive: what the phone does
++                    // not hold is left unwritten, not left unreadable.
++                    match fs::write(&w.path, &w.value) {
++                        Ok(()) => skyward_sys::kmsg(&format!("wrote {} to {} for the touchscreen", w.value, w.path))?,
++                        Err(e) => skyward_sys::kmsg(&format!("{} was not written for the touchscreen: {e}", w.path))?,
++                    }
+                 }
+             } else if keys {
+                 set_nonblocking(dev.as_raw_fd()).context("make buttons non-blocking")?;
+diff --git a/crates/skyward/src/keys.rs b/crates/skyward/src/keys.rs
+index f4b7775..ec6313b 100644
+--- a/crates/skyward/src/keys.rs
++++ b/crates/skyward/src/keys.rs
+@@ -102,7 +102,18 @@ pub fn serves_elements(steps: &[Step]) -> bool {
+ pub fn start(steps: &[Step]) -> Result<()> {
+     for step in steps {
+         match step {
+-            Step::Start(program) => crate::services::start(std::slice::from_ref(program.as_ref()), None)?,
++            Step::Start(program) => {
++                // A service directory is one role: the first to start holds
++                // it, and one that follows cannot take it and answers
++                // nothing, holding up every program after it. The recovery
++                // starts one before this, of the version the phone's own
++                // services were built against.
++                if is_directory(&program.service.path) && directory_is_running(&program.service.path) {
++                    skyward_sys::kmsg(&format!("{}: a service directory already runs, so this one is left out", program.service.path))?;
++                    continue;
++                }
++                crate::services::start(std::slice::from_ref(program.as_ref()), None)?;
++            }
+             Step::ServeElements => {
+                 let readers = skyward_omapi::start()?;
+                 skyward_sys::kmsg(&format!("{} is served, with a reader for each of {} secure elements: {}", skyward_omapi::SERVICE, readers.len(), readers.join(", ")))?;
+@@ -112,6 +123,24 @@ pub fn start(steps: &[Step]) -> Result<()> {
+     Ok(())
+ }
+ 
++/// Whether the program is a service directory, of which only one can run.
++fn is_directory(path: &str) -> bool {
++    let name = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or_default();
++    name == "servicemanager" || name == "hwservicemanager"
++}
++
++/// Whether a program of that name runs now, wherever it was started from.
++fn directory_is_running(path: &str) -> bool {
++    let Some(name) = std::path::Path::new(path).file_name().and_then(|n| n.to_str()) else { return false };
++    let Ok(entries) = std::fs::read_dir("/proc") else { return false };
++    entries.flatten().any(|entry| {
++        std::fs::read_link(entry.path().join("exe"))
++            .ok()
++            .and_then(|target| target.file_name().map(|n| n.to_owned()))
++            .is_some_and(|found| found == name)
++    })
++}
++
+ /// What `steps` are, a line each, as the `keys` command prints them.
+ pub fn describe(steps: &[Step]) -> Vec<String> {
+     let mut lines = Vec::new();
+diff --git a/crates/skyward/src/main.rs b/crates/skyward/src/main.rs
+index cd4cad8..eb32f56 100644
+--- a/crates/skyward/src/main.rs
++++ b/crates/skyward/src/main.rs
+@@ -225,6 +225,13 @@ enum Cmd {
+ }
+ 
+ fn main() -> Result<()> {
++    // A recovery that stops drawing is a phone that answers nothing. What
++    // ended it is written where its log is read from, so that a screen that
++    // went black once can be told why without a serial console.
++    #[cfg(target_os = "android")]
++    std::panic::set_hook(Box::new(|said| {
++        let _ = skyward_sys::kmsg(&format!("the recovery stopped: {said}"));
++    }));
+     // init starts the recovery service by path with no arguments.
+     let started_as = std::env::args_os().next().unwrap_or_default();
+     let name = Path::new(&started_as).file_name().unwrap_or_default();
+@@ -509,8 +516,52 @@ fn lp(super_dev: &Path, slot: Option<u32>) -> Result<()> {
+ 
+ /// Load `names` from the module sources the configuration lists.
+ fn load_modules(cfg: &DeviceConfig, names: &[String]) -> Result<Vec<PathBuf>> {
+-    let dirs = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
+-    skyward_modules::load(&dirs, names)
++    skyward_modules::load(&module_dirs(cfg)?, names)
++}
++
++/// The folders the configuration's module sources name.
++fn module_dirs(cfg: &DeviceConfig) -> Result<Vec<PathBuf>> {
++    cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect()
++}
++
++/// The folder the phone's vendor modules are in, laying out the partition
++/// they are on where the recovery's own table leaves it unmounted.
++///
++/// A phone whose vendor image is the Android 12 one keeps its modules in
++/// the vendor_dlkm partition: the vendor_boot ramdisk carries only the few
++/// a first-stage boot needs, and the recovery's table has no entry for the
++/// partition at all. Those modules are the only ones built against the
++/// kernel the phone runs, so they are what the touchscreen's driver has to
++/// come from. Where they are needed they are laid out here as a device of
++/// the recovery's own and mounted read-only; a phone that keeps them
++/// elsewhere, or has no such partition, is left as it was.
++#[cfg(target_os = "android")]
++fn vendor_modules_folder() -> Result<PathBuf> {
++    let at = Path::new("/vendor_dlkm");
++    if at.join("lib/modules").is_dir() {
++        return Ok(at.to_path_buf());
++    }
++    let slot = skyward_vab::current_slot()?.context("the phone starts from no slot")?;
++    let super_device = Path::new(skyward_block::BY_NAME).join("super");
++    let metadata = skyward_lp::read(&super_device, slot.number())?;
++    let name = format!("vendor_dlkm{}", slot.suffix());
++    let partition = metadata
++        .partition(&name)
++        .or_else(|| metadata.partition("vendor_dlkm"))
++        .with_context(|| format!("the phone's super partition holds no {name}"))?;
++    let device = skyward_block::devnum(&super_device)?;
++    let targets: Vec<skyward_block::dm::Target> = partition
++        .extents
++        .iter()
++        .map(|extent| match *extent {
++            skyward_lp::Extent::Linear { sectors, sector, .. } => skyward_block::dm::Target::Linear { sectors, device, offset: sector },
++            skyward_lp::Extent::Zero { sectors } => skyward_block::dm::Target::Zero { sectors },
++        })
++        .collect();
++    let node = skyward_block::dm::create("skyward-vendor_dlkm", &targets, true)?;
++    std::fs::create_dir_all(at).with_context(|| format!("make {}", at.display()))?;
++    skyward_block::mount::mount_ro(&node, at)?;
++    Ok(at.to_path_buf())
+ }
+ 
+ /// Start the recovery's own logd where it needs libraries of the installed
+@@ -549,9 +600,66 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
+         let at = skyward_block::fstab::mount(name)?;
+         skyward_sys::kmsg(&format!("{name} is mounted on {}", at.display()))?;
+     }
+-    for path in load_modules(cfg, &cfg.modules.load)? {
++    // The vendor modules may be on a partition the recovery's own table
++    // leaves unmounted, and the touchscreen's driver may be one of them.
++    if cfg.modules.sources.iter().any(|source| source == "vendor_dlkm") {
++        match vendor_modules_folder() {
++            Ok(at) => skyward_sys::kmsg(&format!("the phone's vendor modules are at {}", at.display()))?,
++            Err(e) => skyward_sys::kmsg(&format!("the phone's vendor modules are not mounted: {e:#}"))?,
++        }
++    }
++    let (loaded, missing) = skyward_modules::load_each(&module_dirs(cfg)?, &cfg.modules.load);
++    for path in loaded {
+         skyward_sys::kmsg(&format!("loaded {}", path.display()))?;
+     }
++    // A module the phone's own build does not carry costs its own device:
++    // the touchscreen without its driver, say. What reads the phone's keys
++    // must still start, so the rest of the boot goes on without it.
++    for (name, why) in missing {
++        skyward_sys::kmsg(&format!("the phone carries no {name} to load: {why:#}"))?;
++    }
++    // The nodes a driver makes belong to root until the phone's own rules
++    // are given to them, and the programs that use the keys run as users of
++    // their own: qseecom's is opened by the key service as system, and the
++    // driver leaves it to root. The rules are applied again now that the
++    // modules have made their nodes, the first pass having come too early
++    // for any of them.
++    match skyward_sys::ueventd::apply() {
++        Ok(nodes) => skyward_sys::kmsg(&format!("{nodes} device nodes given the owner their phone describes"))?,
++        Err(e) => skyward_sys::kmsg(&format!("the device nodes are not given the owners the phone describes: {e:#}"))?,
++    }
++    // The binder driver's own filesystem holds the nodes the phone's own
++    // programs open. A kernel that keeps the driver as a module has none of
++    // them until something mounts it, and until then nothing that registers
++    // a service starts at all — nor does anything that reads the keys.
++    secure::ensure_binder_nodes();
++    let binder = if Path::new("/dev/binder").exists() { "ready" } else { "missing" };
++    skyward_sys::kmsg(&format!("the binder device is {binder} at /dev/binder"))?;
++    // Where the configuration asks for it, the WLAN's chip is brought up
++    // here, while the screen is still coming up: the chip's own start takes
++    // the better part of ten seconds, which its user would wait at the
++    // switch. On its own thread, so a chip that is slow to start holds up
++    // nothing but itself.
++    // The image may carry a module of its own in place of one of the
++    // phone's: the stock cnss2 waits for a modem this recovery has none of.
++    let carried = std::path::Path::new("/skyward/cnss2.ko");
++    if carried.exists() {
++        let target = "/vendor/lib/modules/cnss2.ko";
++        let status = std::process::Command::new("/vendor/bin/sh")
++            .args(["-c", &format!("mount --bind {} {}", carried.display(), target)])
++            .status();
++        skyward_sys::kmsg(&format!("the image's own cnss2 is put in place of the phone's: {status:?}"))?;
++    }
++    if let Some(wlan) = &cfg.wlan
++        && wlan.prewarm
++    {
++        let dirs = module_dirs(cfg)?;
++        let wlan = wlan.clone();
++        std::thread::spawn(move || match wlan::prewarm(&wlan, &dirs) {
++            Ok(()) => { let _ = skyward_sys::kmsg("the WLAN's chip is up ahead of its switch"); }
++            Err(e) => { let _ = skyward_sys::kmsg(&format!("the WLAN's chip is not up ahead of its switch: {e:#}")); }
++        });
++    }
+     if !cfg.owners.is_empty() {
+         let handed = hand_over(&cfg.owners)?;
+         skyward_sys::kmsg(&format!("{handed} of the phone's own files handed to the accounts its init gives them"))?;
+@@ -591,8 +699,15 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
+     let mut told = registering.clone();
+     told.extend(described.into_iter().filter(|name| !registering.contains(name)));
+     if !told.is_empty() {
+-        secure::publish_descriptions(&told)?;
+-        skyward_sys::kmsg(&format!("the service directory is told of {} of the phone's own services", told.len()))?;
++        // A service directory that turns the telling down — a phone whose
++        // own system describes its services otherwise — leaves the phone's
++        // programs to start anyway: the ones this recovery starts for the
++        // touchscreen and the keys are not there to be told of, and neither
++        // is what decrypts the data partition.
++        match secure::publish_descriptions(&told) {
++            Ok(()) => skyward_sys::kmsg(&format!("the service directory is told of {} of the phone's own services", told.len()))?,
++            Err(e) => skyward_sys::kmsg(&format!("the service directory is not told of the phone's services: {e:#}"))?,
++        }
+     }
+     let libraries = secure::libraries()?;
+     if let Some(dir) = &libraries {
+diff --git a/crates/skyward/src/secure.rs b/crates/skyward/src/secure.rs
+index deefa91..0a4b263 100644
+--- a/crates/skyward/src/secure.rs
++++ b/crates/skyward/src/secure.rs
+@@ -33,7 +33,6 @@ const PHONE_DESCRIPTION: &str = "phone.xml";
+ 
+ /// The name init knows the service directory by, and the program it runs.
+ const DIRECTORY_SERVICE: &str = "servicemanager";
+-const DIRECTORY_PROGRAM: &str = "/system/bin/servicemanager";
+ 
+ /// Where init says which process each of its services runs as, one
+ /// property per service, the service's name following this.
+@@ -54,9 +53,108 @@ const BUNDLE_LOADER: &str = "bin/linker64";
+ 
+ /// Which programs may register which hardware services, and where the
+ /// directory for those services looks for that.
+-const SERVICE_LABELS: &str = "/mnt/system/system/etc/selinux/plat_hwservice_contexts";
++const SERVICE_LABELS: [&str; 2] = [
++    "/mnt/system/system/etc/selinux/plat_hwservice_contexts",
++    "/mnt/system/system/etc/selinux/plat_service_contexts",
++];
+ const RECOVERY_LABELS: &str = "/system/etc/selinux";
+ 
++/// The binder drivers' own filesystem. A phone whose kernel keeps the driver
++/// a module, as this one does, has no nodes until something mounts it: a
++/// stock recovery mounts none of it, and its init starts no service that
++/// would.
++const BINDERFS: &str = "/dev/binderfs";
++
++/// The nodes the phone's programs open, each inside the driver's filesystem.
++const BINDER_NODES: [&str; 3] = ["binder", "vndbinder", "hwbinder"];
++
++/// Mount the driver's filesystem where it is not mounted yet, and put the
++/// nodes the phone's programs open at the names they ask for. Best effort:
++/// a kernel that has no driver leaves the recovery as it was.
++pub fn ensure_binder_nodes() {
++    let dir = Path::new(BINDERFS);
++    if !dir.exists() {
++        if fs::create_dir_all(dir).is_err() {
++            return;
++        }
++        // SAFETY: the three strings outlive the call, and mount reads them only.
++        let made = unsafe { libc::mount(c"binder".as_ptr(), c"/dev/binderfs".as_ptr(), c"binder".as_ptr(), 0, std::ptr::null()) };
++        if made != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EBUSY) {
++            return;
++        }
++    }
++    for name in BINDER_NODES {
++        let node = Path::new("/dev").join(name);
++        let inside = dir.join(name);
++        if !node.exists() && inside.exists() {
++            let _ = std::os::unix::fs::symlink(&inside, &node);
++        }
++        if node.exists() {
++            let _ = fs::set_permissions(&node, std::os::unix::fs::PermissionsExt::from_mode(0o666));
++        }
++    }
++}
++
++/// The directories the phone's own services register with, as the installed
++/// system carries them. A recovery's image may carry neither: the phone's
++/// programs still need one, so the recovery starts these itself.
++const DIRECTORY_ROOT: &str = "/skyward/hidl";
++
++/// The version the phone's vendor image names, read where its own build
++/// properties are: the programs in it were built against that version.
++fn vendor_sdk() -> Option<u32> {
++    let text = fs::read_to_string("/vendor/build.prop").ok()?;
++    text.lines()
++        .find_map(|line| line.strip_prefix("ro.vendor.build.version.sdk="))
++        .and_then(|value| value.trim().parse().ok())
++}
++
++/// The folder of service directories of that version, where the recovery
++/// carries them. A phone whose installed system is the version its vendor
++/// image is needs none: the installed system's own directory serves.
++fn companion() -> Option<PathBuf> {
++    let dir = Path::new(DIRECTORY_ROOT).join(format!("a{}", vendor_sdk()?));
++    dir.is_dir().then_some(dir)
++}
++
++/// The libraries a companion program of that version is built against.
++pub fn companion_libraries() -> Option<PathBuf> {
++    companion().map(|dir| dir.join("lib"))
++}
++
++/// The programs to try as one of the two service directories, the one that
++/// matches the phone's own services first: a directory of another version
++/// takes no registration from them, and answers none of their lookups.
++fn directory_programs(name: &str, fallbacks: &[&str]) -> Vec<String> {
++    let mut programs = Vec::new();
++    if let Some(dir) = companion() {
++        programs.push(dir.join(name).display().to_string());
++    }
++    programs.extend(fallbacks.iter().map(|fallback| fallback.to_string()));
++    programs
++}
++
++fn directory_kinds() -> [(String, Vec<String>); 2] {
++    [
++        ("servicemanager".to_string(), directory_programs("servicemanager", &["/system/bin/servicemanager", "/mnt/system/system/bin/servicemanager"])),
++        ("hwservicemanager".to_string(), directory_programs("hwservicemanager", &["/system/bin/hwservicemanager", "/mnt/system_ext/bin/hwservicemanager"])),
++    ]
++}
++
++/// The libraries to start a directory with: one the recovery carries of its
++/// own version keeps to that version's libraries.
++fn directory_libraries_for(program: &str) -> Result<String> {
++    match companion() {
++        // A directory the recovery carries comes with the libraries of its own
++        // version, and must not be given the installed system's first: those
++        // are of another version, and a program of this one stops as it starts.
++        Some(dir) if Path::new(program).starts_with(&dir) => {
++            Ok(format!("{}/lib:/system/lib64:/vendor/lib64", dir.display()))
++        }
++        _ => directory_libraries(),
++    }
++}
++
+ /// The driver the phone's hardware services talk over, as they expect to
+ /// find it and as a recovery has it.
+ const HARDWARE_DRIVER: &str = "/dev/hwbinder";
+@@ -66,6 +164,14 @@ const HARDWARE_DRIVER_NODE: &str = "/dev/binderfs/hwbinder";
+ /// itself off when the running system does not describe it.
+ const HARDWARE_DIRECTORY: &str = "android.hidl.manager@1.2::IServiceManager/default";
+ 
++/// The name the phone's init knows that directory's program by, which is
++/// also how the two directories are told apart here, and the property it
++/// sets once it takes registrations: on the phone init waits for it before
++/// it starts a service of that kind, which is turned away and ends where
++/// it comes first.
++const HARDWARE_DIRECTORY_PROGRAM: &str = "hwservicemanager";
++const HARDWARE_DIRECTORY_READY: &str = "hwservicemanager.ready";
++
+ /// What says the directory is off. It is read by the services, and in a
+ /// recovery there is nothing else to set it.
+ const DIRECTORY_OFF: &str = "hwservicemanager.disabled";
+@@ -85,6 +191,7 @@ const RECOVERY_MANIFEST: &str = "/system/etc/vintf/manifest.xml";
+ ///
+ /// `wanted` names the hardware services that will be asked for.
+ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
++    ensure_binder_nodes();
+     // A loader and the lowest libraries are built together and agree
+     // between them on how a program's own storage is laid out, so the
+     // installed system's programs are loaded by the installed system's
+@@ -116,15 +223,25 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
+     // as the users their init scripts name.
+     fs::set_permissions(driver, std::os::unix::fs::PermissionsExt::from_mode(0o666))
+         .with_context(|| format!("open {HARDWARE_DRIVER} to every program"))?;
+-    let from = Path::new(SERVICE_LABELS);
+-    let into = Path::new(RECOVERY_LABELS).join(from.file_name().expect("a named file"));
+     fs::create_dir_all(RECOVERY_LABELS).with_context(|| format!("make {RECOVERY_LABELS}"))?;
+     // The directory reads both of these as the user its init script names,
+     // and what the recovery makes under its own umask is root's alone: they
+     // are given the modes the system's own copies have.
+     fs::set_permissions(RECOVERY_LABELS, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+         .with_context(|| format!("open {RECOVERY_LABELS} to every user"))?;
+-    fs::copy(from, &into).with_context(|| format!("copy {} to {}", from.display(), into.display()))?;
++    // The directories label the services they hand out from these, and turn
++    // away a lookup of one they cannot label: a recovery carries neither,
++    // and starts a directory from the installed system, so its own copies
++    // come along.
++    for from in SERVICE_LABELS.map(Path::new) {
++        let into = Path::new(RECOVERY_LABELS).join(from.file_name().expect("a named file"));
++        fs::copy(from, &into).with_context(|| format!("copy {} to {}", from.display(), into.display()))?;
++    }
++    // A recovery ramdisk need not keep the folder the manifest goes in: a stock
++    // recovery describes no hardware service, so its image leaves it out.
++    if let Some(dir) = Path::new(RECOVERY_MANIFEST).parent() {
++        fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
++    }
+     fs::write(RECOVERY_MANIFEST, describe_hardware(wanted)?).with_context(|| format!("write {RECOVERY_MANIFEST}"))?;
+     fs::set_permissions(RECOVERY_MANIFEST, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+         .with_context(|| format!("let every user read {RECOVERY_MANIFEST}"))?;
+@@ -132,6 +249,13 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
+     // description, and a run of it before this was written may have left
+     // that behind.
+     skyward_sys::set_prop(DIRECTORY_OFF, "false")?;
++    // What was described above is what a directory of the older kind
++    // starts on: it is started here, so that the phone's services of that
++    // kind find one waiting when they are started.
++    match start_directories() {
++        Ok(()) => skyward_sys::kmsg("the directories the phone's services register with are running")?,
++        Err(e) => skyward_sys::kmsg(&format!("the directory for the phone's hardware services is not up: {e:#}"))?,
++    }
+     Ok(())
+ }
+ 
+@@ -193,6 +317,113 @@ fn image(file: &Path) -> Result<(u64, u64)> {
+     Ok((start, entry.size()))
+ }
+ 
++/// The service directory running now, whichever name its program has.
++fn running_directory() -> Option<u32> {
++    directory_kinds()
++        .into_iter()
++        .flat_map(|(_, programs)| programs)
++        .find_map(|program| crate::services::running(&program))
++}
++
++/// The libraries the installed system's own programs are built against, in
++/// the order the phone's own init gives them.
++fn directory_libraries() -> Result<String> {
++    let mut dirs = vec!["/mnt/system_ext/lib64".to_string(), "/mnt/system/system/lib64".to_string()];
++    if let Some(dir) = libraries()? {
++        dirs.push(dir.display().to_string());
++    }
++    dirs.push("/system/lib64".to_string());
++    dirs.push("/vendor/lib64".to_string());
++    Ok(dirs.join(":"))
++}
++
++/// Start the directories where the recovery carries none: the phone's own
++/// programs register with them, and without one nothing that uses the
++/// phone's keys can come up.
++fn start_directories() -> Result<()> {
++    let mut hardware = false;
++    for (name, programs) in directory_kinds() {
++        let Some(program) = programs.iter().find(|p| Path::new(p.as_str()).is_file()).cloned() else { continue };
++        hardware |= name == HARDWARE_DIRECTORY_PROGRAM;
++        if crate::services::running(&program).is_some() {
++            continue;
++        }
++        let libs = directory_libraries_for(&program)?;
++        // The installed system's own directory is built from its own
++        // libbinder, which marks calls differently from the recovery's.
++        skyward_binder::parcel::speak_the_system_dialect();
++        if name == HARDWARE_DIRECTORY_PROGRAM {
++            // A run before this one, ended to start this one, leaves the
++            // property saying it was ready: the one about to start says so
++            // again once it takes registrations.
++            let _ = skyward_sys::set_prop(HARDWARE_DIRECTORY_READY, "false");
++        }
++        match std::process::Command::new(&program)
++            .env("LD_LIBRARY_PATH", &libs)
++            .stdin(std::process::Stdio::null())
++            .stdout(std::process::Stdio::null())
++            .stderr(std::process::Stdio::null())
++            .spawn()
++        {
++            Ok(_) => skyward_sys::kmsg(&format!("{program}: the service directory started"))?,
++            Err(e) => skyward_sys::kmsg(&format!("{program}: the service directory did not start: {e}"))?,
++        }
++    }
++    if hardware {
++        wait_for_hardware_directory();
++    }
++    let binder = skyward_binder::driver::Binder::open()?;
++    let until = Instant::now() + Duration::from_secs(5);
++    loop {
++        match skyward_binder::service::find(&binder, "android.os.IServiceManager") {
++            Ok(_) => return Ok(()),
++            Err(e) => {
++                ensure!(Instant::now() < until, "the service directory does not answer: {e:#}");
++            }
++        }
++        std::thread::sleep(Duration::from_millis(100));
++    }
++}
++
++/// Wait until the directory for hardware services takes registrations, as
++/// the phone's init waits for it. A directory that never says so leaves
++/// the services of the older kind to end where they start, which the log
++/// then tells of rather than the boot being held up.
++fn wait_for_hardware_directory() {
++    let until = Instant::now() + Duration::from_secs(5);
++    let ready = loop {
++        if skyward_sys::prop(HARDWARE_DIRECTORY_READY).is_some_and(|value| value == "true") {
++            break true;
++        }
++        if Instant::now() >= until {
++            break false;
++        }
++        std::thread::sleep(Duration::from_millis(50));
++    };
++    let said = match ready {
++        true => "the directory for the phone's hardware services takes registrations",
++        false => "the directory for the phone's hardware services does not say it takes registrations",
++    };
++    let _ = skyward_sys::kmsg(said);
++}
++
++/// Start the directory again after its descriptions changed: init runs no
++/// service of that name on every phone, so the one started here is ended
++/// and started again by hand.
++fn restart_directories() -> Result<()> {
++    for (_, programs) in directory_kinds() {
++        let Some(program) = programs.iter().find(|p| Path::new(p.as_str()).is_file()).cloned() else { continue };
++        let Some(pid) = crate::services::running(&program) else { continue };
++        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
++        let until = Instant::now() + Duration::from_secs(5);
++        while crate::services::running(&program).is_some() {
++            ensure!(Instant::now() < until, "{program}, pid {pid}, does not end");
++            std::thread::sleep(Duration::from_millis(50));
++        }
++    }
++    start_directories()
++}
++
+ /// Tell the phone's service directory of the services in `wanted`, which
+ /// the phone's own programs register and the recovery itself may serve.
+ /// The directory turns away a hardware service the running system does
+@@ -233,6 +464,7 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
+     // these. One an earlier run of the recovery service had start again
+     // knows them already, and is left with what has registered with it
+     // since.
++    start_directories()?;
+     let binder = skyward_binder::driver::Binder::open()?;
+     // The first it does not know described settles that it starts again.
+     let mut unknown = false;
+@@ -248,8 +480,12 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
+         // those services again, as the installed system's init does
+         // whenever its directory restarts.
+         let registered = registered()?;
+-        let was = crate::services::running(DIRECTORY_PROGRAM);
+-        skyward_sys::set_prop("ctl.restart", DIRECTORY_SERVICE).context("have the service directory start again")?;
++        let was = running_directory();
++        if skyward_sys::prop("init.svc.servicemanager").is_some() {
++            skyward_sys::set_prop("ctl.restart", DIRECTORY_SERVICE).context("have the service directory start again")?;
++        } else {
++            restart_directories()?;
++        }
+         answering_again(was)?;
+         register_again(&registered)?;
+     }
+@@ -259,7 +495,7 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
+ /// What has registered with the service directory, each with the init
+ /// service whose process serves it; the directory's own entry is left out.
+ fn registered() -> Result<Vec<(String, String)>> {
+-    let Some(directory) = crate::services::running(DIRECTORY_PROGRAM) else { return Ok(Vec::new()) };
++    let Some(directory) = running_directory() else { return Ok(Vec::new()) };
+     let binder = skyward_binder::driver::Binder::open()?;
+     let started = skyward_sys::props(SERVICE_PIDS);
+     let mut out = Vec::new();
+@@ -337,7 +573,7 @@ fn say_framework(dir: &Path) -> Result<usize> {
+ fn answering_again(was: Option<u32>) -> Result<()> {
+     let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+     loop {
+-        let now = crate::services::running(DIRECTORY_PROGRAM);
++        let now = running_directory();
+         // Looking the directory up in itself answers nothing, and that it
+         // answers at all is the whole question.
+         if now.is_some() && now != was && crate::services::reachable() {
+diff --git a/crates/skyward/src/services.rs b/crates/skyward/src/services.rs
+index 52b8d47..209929a 100644
+--- a/crates/skyward/src/services.rs
++++ b/crates/skyward/src/services.rs
+@@ -17,6 +17,10 @@ use std::process::{Command, ExitStatus, Stdio};
+ use std::thread;
+ use std::time::{Duration, Instant};
+ 
++/// Where the installed system keeps its own libraries, which a recovery
++/// built from older sources may not carry.
++const INSTALLED_LIBRARIES: &str = "/mnt/system/system/lib64";
++
+ /// A program that ends sooner than this after starting waits this long
+ /// before it is started again.
+ const RESTART_DELAY: Duration = Duration::from_secs(1);
+@@ -96,8 +100,15 @@ pub fn once(program: &Started) -> Result<ExitStatus> {
+ }
+ 
+ /// The accounts the phone knows, each by its name.
++/// The accounts the installed system's own list names, which a recovery's
++/// partitions need not carry: the programs started from those partitions
++/// run as the users their init scripts name.
++const INSTALLED_ACCOUNTS: [&str; 2] = ["/mnt/system/system/etc/passwd", "/mnt/system/system/etc/group"];
++
+ fn accounts() -> HashMap<String, u32> {
+-    ueventd::accounts(&ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).copied().collect::<Vec<_>>())
++    let files: Vec<&str> =
++        ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).chain(&INSTALLED_ACCOUNTS).copied().collect();
++    ueventd::accounts(&files)
+ }
+ 
+ /// What `program` is started with, worked out before it is: the program
+@@ -111,6 +122,37 @@ fn readied(program: &Started, libraries: Option<&Path>, known: &HashMap<String,
+     if let Some(dir) = libraries {
+         s.libraries.push(dir.to_string_lossy().into_owned());
+     }
++    // A recovery is built from the sources of some Android version, and a
++    // hardware service from the installed system may need a library of its
++    // own that the recovery's copy is too old to carry. Only those are given
++    // the installed system's folder, searched after every folder the program
++    // names: the phone's own copies still come first, and the programs that
++    // are the phone's own (a shell, its daemons) keep to the libraries they
++    // were built against.
++    // A service of the older kind registers with a directory of the version it
++    // was built for, and turns to drivers of that version to reach it: where
++    // the recovery carries that version, it is searched before the phone's own
++    // folder. A service of the newer kind carries calls over the driver the
++    // installed system's own sources build, which the phone's older partitions
++    // do not have; only those are given the installed system's libraries.
++    if s.path.starts_with("/vendor/bin/hw/") {
++        let mut libs = Vec::new();
++        // A program of the phone's own is built against the version its
++        // vendor image is, and registers with the directory of that version:
++        // where the recovery carries those libraries, they come first. Only a
++        // phone whose recovery carries none falls back on the installed
++        // system's.
++        match crate::secure::companion_libraries() {
++            Some(dir) => libs.push(dir.display().to_string()),
++            None if Path::new(INSTALLED_LIBRARIES).is_dir() => libs.push(INSTALLED_LIBRARIES.to_string()),
++            None => {}
++        }
++        if !s.libraries.iter().any(|l| l == "/vendor/lib64") {
++            libs.push("/vendor/lib64".to_string());
++        }
++        libs.append(&mut s.libraries);
++        s.libraries = libs;
++    }
+     let who = Credentials::of(&s, known)?;
+     let given = Given::of(program, known)?;
+     Ok((s, who, given))
+@@ -330,8 +372,11 @@ fn ready(s: &Service) -> Result<()> {
+     };
+     let until = Instant::now() + READY_TIMEOUT;
+     loop {
++        // A property says a program is ready by being set at all, the
++        // phone's init counting a false one as unset: it sets some to
++        // false when the program starts again.
+         if let Some(name) = &s.ready_property
+-            && skyward_sys::prop(name).is_some_and(|v| !v.is_empty())
++            && skyward_sys::prop(name).is_some_and(|value| !value.is_empty() && value != "false" && value != "0")
+         {
+             return Ok(());
+         }
+@@ -355,19 +400,37 @@ fn ready(s: &Service) -> Result<()> {
+ }
+ 
+ fn supervise(s: &Service, who: &Credentials, given: &Given) -> ! {
++    // A program that ends at once is started again, as init does; what it
++    // says of each ending is kept to one line a while, so a program that
++    // keeps ending does not fill the phone's log. The wait before it is
++    // started again grows while it keeps ending at once: a program this
++    // phone cannot run here would otherwise be started every second for as
++    // long as the recovery runs. One that ran a while starts over.
++    let mut told = 0usize;
++    let mut last = Instant::now() - RESTART_DELAY;
++    let mut quick = 0u32;
+     loop {
+         let started = Instant::now();
+         let ended = match running(&s.path) {
+             Some(pid) => wait_for(pid).map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
+             None => run(s, who, given),
+         };
+-        let line = match ended {
+-            Ok(how) => format!("{}: {how}", s.path),
+-            Err(e) => format!("{}: {e:#}", s.path),
+-        };
+-        let _ = skyward_sys::kmsg(&line);
++        told += 1;
++        if told == 1 || last.elapsed() >= RESTART_DELAY * 30 {
++            let line = match &ended {
++                Ok(how) => format!("{}: {how} ({told} so far)", s.path),
++                Err(e) => format!("{}: {e:#} ({told} so far)", s.path),
++            };
++            let _ = skyward_sys::kmsg(&line);
++            last = Instant::now();
++        }
+         if started.elapsed() < RESTART_DELAY {
+-            thread::sleep(RESTART_DELAY);
++            quick = quick.saturating_add(1);
++            let wait = (RESTART_DELAY * 2u32.saturating_pow(quick.min(6)))
++                .min(Duration::from_secs(60));
++            thread::sleep(wait);
++        } else {
++            quick = 0;
+         }
+     }
+ }
+@@ -391,7 +454,16 @@ fn run(s: &Service, who: &Credentials, given: &Given) -> Result<String> {
+ /// searched after those it is given here.
+ fn command(s: &Service, who: &Credentials, given: &Given, handed: &[(String, OwnedFd)]) -> Command {
+     let mut cmd = Command::new(&s.path);
+-    cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
++    cmd.args(&s.args).current_dir("/").stdin(Stdio::null()).stdout(Stdio::null());
++    // What a program says as it starts is kept beside the recovery's own log:
++    // one that ends at once otherwise leaves no word of why.
++    let folder = Path::new(skyward_sys::LOG).parent().unwrap_or(Path::new("/")).join("services");
++    let _ = fs::create_dir_all(&folder);
++    let name = Path::new(&s.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "program".into());
++    match fs::File::create(folder.join(format!("{name}.err"))) {
++        Ok(file) => cmd.stderr(Stdio::from(file)),
++        Err(_) => cmd.stderr(Stdio::null()),
++    };
+     let mut libraries = s.libraries.clone();
+     for (name, value) in &given.environment {
+         match name == LIBRARY_PATH {
+diff --git a/crates/skyward/src/ui.rs b/crates/skyward/src/ui.rs
+index 06374c8..36ce6c1 100644
+--- a/crates/skyward/src/ui.rs
++++ b/crates/skyward/src/ui.rs
+@@ -1117,8 +1117,23 @@ pub fn run(cfg: &DeviceConfig, programs: &[Service], font: &Path, mono: &Path, r
+     // A uevent may be a charger or a computer attached or taken away: the
+     // battery is read at once, and the phone stays awake until it is.
+     let uevents = uevent::Listener::open()?;
++    let mut said = None::<String>;
+     loop {
+-        pages.turn(&sleeper, &uevents)?;
++        // A turn that ends badly — a panel that will not take a commit, a
++        // frame that does not come — is told of and the loop goes on. The
++        // phone's own screen is the only way it can be told anything, and a
++        // recovery that has stopped drawing answers nothing at all.
++        match pages.turn(&sleeper, &uevents) {
++            Ok(()) => said = None,
++            Err(e) => {
++                let why = format!("{e:#}");
++                if said.as_deref() != Some(why.as_str()) {
++                    skyward_sys::kmsg(&format!("a turn of the screen ended: {why}"))?;
++                    said = Some(why);
++                }
++                std::thread::sleep(Duration::from_millis(50));
++            }
++        }
+     }
+ }
+ 
+@@ -1148,6 +1163,8 @@ struct Pages<'a> {
+     /// adbd and fastbootd ask over it to go over to fastboot and back.
+     control: Option<Control>,
+     haptics: Option<Haptics>,
++    /// Said once a click the driver turned down, and no more.
++    motor_refused: bool,
+     backlight: Backlight,
+     keeper: Keeper,
+     shown_clock: String,
+@@ -1409,6 +1426,7 @@ impl<'a> Pages<'a> {
+             touch_known: false,
+             control,
+             haptics,
++            motor_refused: false,
+             backlight,
+             keeper,
+             shown_clock: String::new(),
+@@ -1664,16 +1682,28 @@ impl<'a> Pages<'a> {
+ 
+     /// One click of the motor, as strong as the settings say.
+     fn click(&mut self) -> Result<()> {
+-        if let Some(h) = &mut self.haptics {
+-            h.click(self.app.state.vibration)?;
++        if let Some(h) = &mut self.haptics
++            && let Err(e) = h.click(self.app.state.vibration)
++        {
++            // A click the driver turns down costs its own tap, not the
++            // motor: the next may be one it takes. The first is said where
++            // its log is read from, and no more.
++            if !self.motor_refused {
++                skyward_sys::kmsg(&format!("the motor took no click, and is left trying: {e:#}"))?;
++                self.motor_refused = true;
++            }
+         }
+         Ok(())
+     }
+ 
+     /// The motor's ticks of the screen going off.
+     fn ticks(&mut self) -> Result<()> {
+-        if let Some(h) = &mut self.haptics {
+-            h.ticks()?;
++        if let Some(h) = &mut self.haptics
++            && let Err(e) = h.ticks()
++            && !self.motor_refused
++        {
++            skyward_sys::kmsg(&format!("the motor took no ticks, and is left trying: {e:#}"))?;
++            self.motor_refused = true;
+         }
+         Ok(())
+     }
+@@ -2641,6 +2671,7 @@ impl Pages<'_> {
+                 wlan_worker(&self.wlan)?.send(wlan::Command::Join { ssid, name, security, password: password.0 })
+             }
+             Effect::LeaveWlan => wlan_worker(&self.wlan)?.send(wlan::Command::Leave),
++            Effect::ForgetWlan { ssid } => wlan_worker(&self.wlan)?.send(wlan::Command::Forget { ssid }),
+             Effect::CheckUpdate => self.check_update()?,
+             Effect::Download(release) => self.download(release, now)?,
+             Effect::StopDownload => self.downloader.as_ref().context("there is no download to stop")?.stop(),
+diff --git a/crates/skyward/src/wlan.rs b/crates/skyward/src/wlan.rs
+index 734a499..eb0a240 100644
+--- a/crates/skyward/src/wlan.rs
++++ b/crates/skyward/src/wlan.rs
+@@ -4,11 +4,13 @@
+ //! stand each time that changes.
+ 
+ use anyhow::{bail, ensure, Context, Result};
++use skyward_block::{fstab, mount};
+ use skyward_config::{Firmware, Wlan as Config};
+ use skyward_net::dhcp::{self, Kept, Lease};
+ use skyward_net::http::Servers;
+ use skyward_net::iface;
+ use skyward_net::reach::{self, Reach};
++use skyward_net::saved;
+ use skyward_net::supplicant::{self, Bss, Control, Event as Told, Security};
+ use skyward_net::wlan::{self, Joined, Link, Next, Power, Stage, Traffic, Wlan};
+ use skyward_sys::worker::{self, Teller};
+@@ -40,7 +42,7 @@ const WIFI: u32 = 1010;
+ 
+ /// How long the driver may take to make its interface, the chip's firmware
+ /// loading meanwhile.
+-const INTERFACE_WAIT: Duration = Duration::from_secs(20);
++const INTERFACE_WAIT: Duration = Duration::from_secs(45);
+ 
+ /// How long the supplicant may take to open its control socket.
+ const SOCKET_WAIT: Duration = Duration::from_secs(10);
+@@ -64,6 +66,9 @@ pub enum Command {
+     Off,
+     Scan,
+     Join { ssid: Vec<u8>, name: String, security: Security, password: String },
++    /// Leave the network joined, and take it from the ones the phone
++    /// holds, so that it is not joined again on its own.
++    Forget { ssid: Vec<u8> },
+     Leave,
+ }
+ 
+@@ -106,7 +111,8 @@ impl Worker {
+         let (inbox, asked) = worker::telling().context("make the WLAN thread's inbox")?;
+         let back = inbox.clone();
+         let worker = worker::Worker::start("wlan", move |tell| {
+-            let mut s = Station { cfg, modules, libraries, servers, state: Wlan::default(), running: None, back, tell };
++            let mut s =
++                Station { cfg, modules, libraries, servers, state: Wlan::default(), running: None, seeded: Vec::new(), typed: None, back, tell };
+             s.run(&asked);
+         })?;
+         Ok(Worker { inbox, worker })
+@@ -200,6 +206,12 @@ struct Station {
+     servers: Servers,
+     state: Wlan,
+     running: Option<Running>,
++    /// The networks the phone held when the supplicant started, each of
++    /// which it joins on its own.
++    seeded: Vec<saved::Saved>,
++    /// What was typed at the network being joined, kept until the access
++    /// point has agreed keys with it, for it to be written down then.
++    typed: Option<(Vec<u8>, Security, String)>,
+     /// What a thread asking for an address, or looking how far the
+     /// network reaches, answers to: the thread's own inbox.
+     back: Teller<Inbox>,
+@@ -259,6 +271,7 @@ impl Station {
+             }
+             Command::Join { ssid, name, security, password } => {
+                 self.unaddress();
++                self.typed = Some((ssid.clone(), security, password.clone()));
+                 let mut joined = Joined { ssid, name, security, stage: Stage::Joining };
+                 if let Err(e) = self.join(&joined, &password) {
+                     let _ = skyward_sys::kmsg(&format!("joining {} failed: {e:#}", joined.name));
+@@ -266,8 +279,36 @@ impl Station {
+                 }
+                 self.state.joined = Some(joined);
+             }
++            Command::Forget { ssid } => {
++                self.typed = None;
++                let joined_this = self.state.joined.as_ref().is_some_and(|j| j.ssid == ssid);
++                if joined_this {
++                    self.unaddress();
++                    if let Some(r) = &self.running
++                        && let Err(e) = r.control.order("REMOVE_NETWORK all")
++                    {
++                        self.lost(e);
++                    }
++                    self.state.joined = None;
++                }
++                // It is taken from what the supplicant was set up with as
++                // well, for it is not adopted again this start.
++                self.seeded.retain(|held| held.ssid != ssid);
++                match self.drop_network(&ssid) {
++                    Ok(()) => {
++                        let _ = skyward_sys::kmsg(&format!(
++                            "{} is taken from the networks the phone holds",
++                            String::from_utf8_lossy(&ssid)
++                        ));
++                    }
++                    Err(e) => {
++                        let _ = skyward_sys::kmsg(&format!("the network left is not taken from the ones the phone holds: {e:#}"));
++                    }
++                }
++            }
+             Command::Leave => {
+                 self.unaddress();
++                self.typed = None;
+                 if let Some(r) = &self.running
+                     && let Err(e) = r.control.order("REMOVE_NETWORK all")
+                 {
+@@ -297,9 +338,10 @@ impl Station {
+         }
+     }
+ 
+-    fn start(&self) -> Result<Running> {
++    fn start(&mut self) -> Result<Running> {
+         bring_up(&self.cfg, &self.modules)?;
+-        let mut child = start_supplicant(&self.cfg, self.libraries.as_deref())?;
++        self.seeded = saved_networks();
++        let mut child = start_supplicant(&self.cfg, self.libraries.as_deref(), &self.seeded)?;
+         let socket = Path::new(HOME).join("sockets").join(&self.cfg.interface);
+         let connected = (|| -> Result<(Control, Control)> {
+             let control = Control::open(&socket)?;
+@@ -334,6 +376,7 @@ impl Station {
+ 
+     fn off(&mut self) {
+         self.unaddress();
++        self.typed = None;
+         if let Some(mut r) = self.running.take() {
+             end(&mut r.child, Some(&r.control));
+         }
+@@ -401,8 +444,26 @@ impl Station {
+     }
+ 
+     fn joining(&mut self, told: &Told) {
+-        let Some(j) = &mut self.state.joined else { return };
+-        match j.on(told) {
++        if self.state.joined.is_none() {
++            return self.adopt(told);
++        }
++        // What to write down once the access point has agreed keys with
++        // the network being joined, where a password was typed at it: the
++        // agreeing is where the password is known right.
++        let mut note = None;
++        let action = {
++            let Some(j) = &mut self.state.joined else { return };
++            let action = j.on(told);
++            if matches!(told, Told::Connected)
++                && matches!(j.stage, Stage::Addressing | Stage::Connected(_))
++                && let Some((ssid, security, password)) = &self.typed
++                && j.ssid == *ssid
++            {
++                note = Some(saved::Saved { ssid: ssid.clone(), security: *security, password: password.clone() });
++            }
++            action
++        };
++        match action {
+             Next::Show => {}
+             Next::Address => self.ask_address(),
+             Next::Unaddress => self.unaddress(),
+@@ -414,6 +475,63 @@ impl Station {
+                 }
+             }
+         }
++        if let Some(network) = note {
++            match Self::keep(network) {
++                Ok(()) => {
++                    let _ = skyward_sys::kmsg("the network joined is kept for the next start");
++                }
++                Err(e) => {
++                    let _ = skyward_sys::kmsg(&format!("the network joined is not kept: {e:#}"));
++                }
++            }
++        }
++    }
++
++    /// Write a network the phone holds, on the partition the phone's own
++    /// boot may have left mounted read-only, which is made writable only
++    /// for the writing, as the settings are.
++    fn keep(network: saved::Saved) -> Result<()> {
++        skyward_vab::metadata_writable(true).context("make /metadata writable")?;
++        let wrote = saved::remember(&saved::folder(), network);
++        let back = skyward_vab::metadata_writable(false);
++        wrote?;
++        back
++    }
++
++    /// Take `ssid` from the networks the phone holds, the partition made
++    /// writable for the taking, as for the keeping.
++    fn drop_network(&mut self, ssid: &[u8]) -> Result<()> {
++        skyward_vab::metadata_writable(true).context("make /metadata writable")?;
++        let dropped = saved::forget(&saved::folder(), ssid);
++        let back = skyward_vab::metadata_writable(false);
++        dropped?;
++        back
++    }
++
++    /// A network the phone held has joined on its own, where the
++    /// supplicant says one is joined and the screen carries none yet: the
++    /// one joined is found among those the phone held, and carried as the
++    /// screen's own from there, its address asked for and all.
++    fn adopt(&mut self, told: &Told) {
++        if !matches!(told, Told::Connected) {
++            return;
++        }
++        let Some(r) = &self.running else { return };
++        let said = match r.control.ask("STATUS") {
++            Ok(said) => said,
++            Err(e) => return self.lost(e),
++        };
++        // The name the supplicant says it is joined to is read as the
++        // file's, where a name of bytes that are not characters is not
++        // found; the network stays joined all the same.
++        let joined = said.lines().find_map(|line| line.strip_prefix("ssid=").map(str::as_bytes));
++        let Some(held) = joined.and_then(|ssid| self.seeded.iter().find(|held| held.ssid == ssid)) else {
++            return;
++        };
++        let joined = Joined { ssid: held.ssid.clone(), name: String::from_utf8_lossy(&held.ssid).into_owned(), security: held.security, stage: Stage::Joining };
++        let _ = skyward_sys::kmsg(&format!("{} is joined as the phone holds it", joined.name));
++        self.state.joined = Some(joined);
++        self.joining(told);
+     }
+ 
+     /// Ask the network for an address, on a thread of its own.
+@@ -620,6 +738,15 @@ impl Station {
+     }
+ }
+ 
++/// Load the driver where its interface is not there yet, and bring the
++/// interface up, ahead of the switch: the chip's own coming up takes the
++/// better part of ten seconds, and a recovery may as well spend that while
++/// its user is still reading the screen. What this costs is the chip's
++/// power; what failing costs is the wait, not the WLAN.
++pub fn prewarm(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
++    bring_up(cfg, modules)
++}
++
+ /// Load the driver where its interface is not there yet, and bring the
+ /// interface up.
+ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
+@@ -672,8 +799,31 @@ fn place(file: &Firmware) -> Result<()> {
+     }
+ }
+ 
++/// The networks the phone holds, on the partition that outlives a start
++/// of the recovery. Nothing here stops the WLAN: where the partition does
++/// not come up, the phone starts with none of them, and the log says why.
++fn saved_networks() -> Vec<saved::Saved> {
++    let outcome = (|| -> Result<Vec<saved::Saved>> {
++        let at = Path::new("/metadata");
++        if !mount::is_mount_point(at)? {
++            let entry = fstab::partition("metadata")?.context("the phone's own table does not mount metadata")?;
++            let device = fstab::device(&entry)?;
++            fs::create_dir_all(at).with_context(|| format!("make {}", at.display()))?;
++            mount::mount(Path::new(&device), at, &entry.filesystem, &["rw".into(), "nosuid".into(), "nodev".into(), "noatime".into()])?;
++        }
++        saved::load(&saved::folder())
++    })();
++    match outcome {
++        Ok(networks) => networks,
++        Err(e) => {
++            let _ = skyward_sys::kmsg(&format!("the phone holds no saved networks: {e:#}"));
++            Vec::new()
++        }
++    }
++}
++
+ /// Start the supplicant on the interface, and wait for its control socket.
+-fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
++fn start_supplicant(cfg: &Config, libraries: Option<&Path>, held: &[saved::Saved]) -> Result<Child> {
+     let home = Path::new(HOME);
+     let sockets = home.join("sockets");
+     fs::create_dir_all(&sockets).with_context(|| format!("make {}", sockets.display()))?;
+@@ -681,8 +831,24 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
+     std::os::unix::fs::chown(&sockets, Some(WIFI), Some(WIFI)).with_context(|| format!("give {} to the supplicant", sockets.display()))?;
+     fs::set_permissions(&sockets, fs::Permissions::from_mode(0o770)).with_context(|| format!("keep {} to the supplicant", sockets.display()))?;
+     let settings = home.join("wpa_supplicant.conf");
+-    fs::write(&settings, format!("ctrl_interface={}\nupdate_config=0\np2p_disabled=1\npmf=1\nsae_pwe=2\n", sockets.display()))
+-        .with_context(|| format!("write {}", settings.display()))?;
++    // The chip keeps the world-safe channels where no domain is told it,
++    // which holds none of the higher 5 GHz ones a router here sits on.
++    let mut conf = format!("ctrl_interface={}\nupdate_config=0\np2p_disabled=1\npmf=1\nsae_pwe=2\n", sockets.display());
++    if let Some(country) = &cfg.country {
++        conf.push_str(&format!("country={country}\n"));
++    }
++    // The networks joined before are set up here, for the supplicant to
++    // join the one it finds on its own. One the file says unreadably is
++    // passed over, and the rest set up still.
++    for network in held {
++        match supplicant::network_block(&network.ssid, network.security, &network.password) {
++            Ok(block) => conf.push_str(&block),
++            Err(e) => {
++                let _ = skyward_sys::kmsg(&format!("a network the phone holds is not set up: {e:#}"));
++            }
++        }
++    }
++    fs::write(&settings, conf).with_context(|| format!("write {}", settings.display()))?;
+     fs::set_permissions(&settings, fs::Permissions::from_mode(0o644)).with_context(|| format!("open {} to the supplicant", settings.display()))?;
+     let socket = sockets.join(&cfg.interface);
+     // One an earlier run left would answer nothing.
+@@ -693,6 +859,11 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
+     if let Some(dir) = libraries {
+         path.push(dir.to_string_lossy().into_owned());
+     }
++    // What the supplicant says as it starts is kept beside the recovery's own
++    // log: one that ends at once otherwise leaves no word of why.
++    let folder = Path::new(skyward_sys::LOG).parent().unwrap_or(Path::new("/")).join("services");
++    let _ = fs::create_dir_all(&folder);
++    let said = fs::File::create(folder.join("wpa_supplicant.err"));
+     let mut child = Process::new(&cfg.supplicant)
+         .args(["-i", &cfg.interface, "-D", "nl80211", "-c"])
+         .arg(&settings)
+@@ -700,7 +871,10 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
+         .current_dir("/")
+         .stdin(Stdio::null())
+         .stdout(Stdio::null())
+-        .stderr(Stdio::null())
++        .stderr(match said {
++            Ok(file) => Stdio::from(file),
++            Err(_) => Stdio::null(),
++        })
+         .spawn()
+         .with_context(|| format!("start {}", cfg.supplicant))?;
+     let until = Instant::now() + SOCKET_WAIT;
+diff --git a/devices/zeus.toml b/devices/zeus.toml
+new file mode 100644
+index 0000000..e249322
+--- /dev/null
++++ b/devices/zeus.toml
+@@ -0,0 +1,157 @@
++[device]
++codename = "zeus"
++brand = "Xiaomi"
++model = "Xiaomi 12 Pro"
++ab = true
++soc = { hans = "第一代骁龙®8移动平台", hant = "Snapdragon® 8 Gen 1 行動平台", en = "Snapdragon® 8 Gen 1 Mobile Platform" }
++os_version_prop = "ro.mi.os.version.incremental"
++
++[display]
++# The panel's own mode, which this phone runs its system at as well: its
++# persist.sys.miui_resolution holds 1440,3200,560, so the system scales
++# nothing down and the density is the system's own. The recovery asks the
++# panel for its size and lays the pages out at the density given here, which
++# at the panel's width comes to the same 411 dp the system has at 420 on a
++# 1080-wide mode.
++width = 1440
++height = 3200
++density = 560
++diagonal = 6.73
++
++[modules]
++# The stock recovery's ramdisk carries no modules at all: init.recovery.qcom.rc
++# insmods the audio modules straight out of /vendor/lib/modules at
++# early-init, so that partition is mounted before the recovery service runs
++# and holds the phone's 319 modules with the modules.dep they are read from.
++# vendor_dlkm carries the same list and is named after vendor, for the run
++# that finds that one mounted; the phone has no system_dlkm.
++sources = ["vendor", "vendor_dlkm"]
++# The touchscreen: ST FTS over SPI behind Xiaomi's touch layer, which
++# xiaomi_touch binds below it and brings the panel's event notifier with it.
++# The phone ships FocalTech's driver as well, which drives no device on the
++# units that carry this panel; it is left out rather than loaded and made to
++# fail, since every module the configuration names has to load.
++load = ["fts_touch_spi"]
++
++[touch]
++# What turns the controller's raw frames into touches is Xiaomi's touch
++# feature service, and a recovery runs none of it: the driver reports
++# positions itself, which this leaves on as the phone's system has it.
++writes = [{ path = "/sys/class/touch/touch_dev/enable_touch_raw", value = "0" }]
++
++# The WLAN firmware is on the modem partition, which the phone mounts at
++# /vendor/firmware_mnt and shows at /vendor/firmware.
++[firmware]
++partition = "modem"
++
++# persist, which the phone mounts at /mnt/vendor/persist: the WLAN's MAC
++# address is there, and so is what the key service needs for a key that
++# cannot be rolled back.
++[partitions]
++mounted = ["persist", "metadata"]
++
++# What the phone's own init runs once the system has finished starting, as
++# kernel-post-boot in /vendor/etc/init/hw/init.qti.kernel.rc. The kernel
++# starts the CPU clusters on the performance governor, which holds them at
++# their highest clock; the script hands them to WALT, lets idle CPUs power
++# down and sets how the memory bus scales. Without it the CPUs stay at
++# their highest clock and voltage even while idle, and the phone slowly
++# heats up.
++[[service]]
++path = "/vendor/bin/sh"
++args = ["/vendor/bin/init.kernel.post_boot.sh"]
++libraries = ["/system/lib64", "/vendor/lib64"]
++oneshot = true
++user = "root"
++groups = ["root", "system", "wakelock", "graphics"]
++
++# WLAN: Qualcomm's QCA6490 on the cnss2 platform driver, the module the
++# phone's own system has loaded as qca6490 and the one of the two it carries
++# whose firmware folder is in /vendor/etc/wifi. The driver reads its settings
++# and the MAC address through the firmware loader, so both are handed over
++# under the names it asks for; the MAC is read from persist, which is mounted
++# above, rather than by mounting that partition a second time. Once fs_ready
++# is written, cnss2 powers the chip up and wlan0 appears.
++#
++# The supplicant is the vendor partition's own, built from Android 12: it
++# registers with the hardware service directory of that version and runs on
++# its libraries, which the recovery carries under /skyward/hidl/a<sdk>. The
++# version is filled in from the stock image as the image is packed, and the
++# system's own copies come after, if at all.
++[wlan]
++modules = ["qca_cld3_qca6490"]
++writes = [{ path = "/sys/kernel/cnss/fs_ready", value = "1" }]
++firmware = [
++    { name = "wlan/qca_cld/qca6490/WCNSS_qcom_cfg.ini", path = "/vendor/etc/wifi/qca6490/WCNSS_qcom_cfg.ini" },
++    { name = "wlan/qca_cld/qca6490/wlan_mac.bin", path = "/mnt/vendor/persist/qca6490/wlan_mac.bin" },
++]
++interface = "wlan0"
++supplicant = "/vendor/bin/hw/wpa_supplicant"
++libraries = ["/skyward/hidl/a{sdk}/lib", "/vendor/lib64"]
++service = "android.hardware.wifi.supplicant.ISupplicant/default"
++probe = "http://connect.rom.miui.com/generate_204"
++# The chip's own coming up takes twenty seconds once its driver is in: cnss2
++# waits eleven of them for a MAC address from the modem's DMS service, which
++# a recovery has no modem to answer, and a first boot runs the chip's cold
++# boot calibration for six more, which its user would wait at the switch: the
++# driver is brought up as the recovery starts instead.
++prewarm = true
++
++# The update server the stock updater of the Chinese system asks.
++[update]
++server = "https://update.miui.com/updates/miotaV3.php"
++
++# No [stock] block: this recovery is built on the Chinese OS3.0.3.0.VLBCNXM,
++# whose full update package on the phone maker's own download server is what
++# the stock recovery image came out of, but the package's name carries a
++# hash of its own that the image cannot be made to say. The stock build's
++# name is kept here for the record:
++#   version  = "OS3.0.3.0.VLBCNXM"
++#   recovery = the stock recovery partition's SHA-256, printed by
++#              skyward-pack's own run of this build
++
++# The AW8697, which this phone's system drives through its own waves: the
++# driver registers an input device taking periodic force-feedback effects
++# (/dev/input/event2, FF_PERIODIC and the custom waveform among them), and
++# plays samples at the frequency it calibrates the motor to. That
++# calibration is kept: the driver measures f0 1670 as it probes, and the
++# factory's own value is in persist, which is mounted above, as 1662
++# (166.2 Hz, in tenths of a hertz as the pages read it). The system's own
++# clicks feel as one at a quarter of this, and past three quarters the
++# motor rattles, as on the phones already running this recovery.
++[haptics]
++resonance = "/mnt/vendor/persist/haptics/vib_cal_f0"
++strength = { lightest = 0.25, strongest = 0.75 }
++
++# The partitions a backup of the baseband and EFS takes: the baseband's
++# settings, with the IMEI, and the sensors' calibration. And what of the
++# data partition a backup leaves out because the secure world keeps it in
++# step with itself: its own storage, its apps' data, that of Xiaomi's own
++# trusted environment, the secure element's state and the fingerprint
++# templates.
++[backup]
++efs = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
++data_skipped = [
++    "vendor/tzstorage",
++    "vendor/qtee",
++    "vendor/mitee",
++    "vendor/goodix",
++    "vendor/fingerprint",
++    "vendor/fpdata",
++    "vendor/misc/mi_fp",
++]
++
++# Where the phone's own programs keep logs in the data partition: the
++# system's, the minidumps, what Xiaomi's log manager keeps of each part of
++# the phone, and what the modem and Wi-Fi leave when they crash.
++[wipe]
++logs = [
++    "/data/miuilog",
++    "/data/vendor/diag",
++    "/data/vendor/bsplog",
++    "/data/vendor/log",
++    "/data/vendor/ramdump",
++    "/data/vendor/ssrdump",
++    "/data/vendor/tombstones",
++    "/data/vendor/wlan_logs",
++]
