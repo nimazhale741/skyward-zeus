@@ -864,7 +864,7 @@ index b46f2eb..8b27929 100644
  ];
  
 diff --git a/crates/skyward-ui/locales/de.toml b/crates/skyward-ui/locales/de.toml
-index 6d71e4f..f75c782 100644
+index 6d71e4f..3ca36ed 100644
 --- a/crates/skyward-ui/locales/de.toml
 +++ b/crates/skyward-ui/locales/de.toml
 @@ -418,6 +418,7 @@ ip_address = "IP-Adresse"
@@ -875,8 +875,16 @@ index 6d71e4f..f75c782 100644
  generation = "Wi-Fi {n}"
  off = "Aus"
  turning_on = "Wird eingeschaltet"
+@@ -641,6 +642,7 @@ model = "Modell"
+ processor = "Prozessor"
+ ram = "RAM"
+ battery_capacity = "Akkukapazität"
++capacity_pair = "Design {design} / tatsächlich {actual}"
+ screen_size = "Displaygröße"
+ resolution = "Auflösung"
+ os_version = "OS-Version"
 diff --git a/crates/skyward-ui/locales/en.toml b/crates/skyward-ui/locales/en.toml
-index a284abb..b9d80fa 100644
+index a284abb..f6ac4ce 100644
 --- a/crates/skyward-ui/locales/en.toml
 +++ b/crates/skyward-ui/locales/en.toml
 @@ -481,6 +481,7 @@ ip_address = "IP address"
@@ -887,8 +895,16 @@ index a284abb..b9d80fa 100644
  generation = "Wi-Fi {n}"
  # What the home page says beside its WLAN entry.
  off = "Off"
+@@ -727,6 +728,7 @@ model = "Model"
+ processor = "Processor"
+ ram = "RAM"
+ battery_capacity = "Battery capacity"
++capacity_pair = "{design} design / {actual} actual"
+ screen_size = "Screen size"
+ resolution = "Resolution"
+ os_version = "OS version"
 diff --git a/crates/skyward-ui/locales/es.toml b/crates/skyward-ui/locales/es.toml
-index 01b74b4..581d722 100644
+index 01b74b4..343b138 100644
 --- a/crates/skyward-ui/locales/es.toml
 +++ b/crates/skyward-ui/locales/es.toml
 @@ -421,6 +421,7 @@ ip_address = "Dirección IP"
@@ -899,8 +915,16 @@ index 01b74b4..581d722 100644
  generation = "Wi-Fi {n}"
  off = "Desactivado"
  turning_on = "Activando"
+@@ -646,6 +647,7 @@ model = "Modelo"
+ processor = "Procesador"
+ ram = "RAM"
+ battery_capacity = "Capacidad de batería"
++capacity_pair = "Diseño {design} / real {actual}"
+ screen_size = "Tamaño de pantalla"
+ resolution = "Resolución"
+ os_version = "Versión del SO"
 diff --git a/crates/skyward-ui/locales/fr.toml b/crates/skyward-ui/locales/fr.toml
-index c52c77b..d560ffe 100644
+index c52c77b..da3a816 100644
 --- a/crates/skyward-ui/locales/fr.toml
 +++ b/crates/skyward-ui/locales/fr.toml
 @@ -421,6 +421,7 @@ ip_address = "Adresse IP"
@@ -911,8 +935,16 @@ index c52c77b..d560ffe 100644
  generation = "Wi-Fi {n}"
  off = "Désactivé"
  turning_on = "Activation"
+@@ -646,6 +647,7 @@ model = "Modèle"
+ processor = "Processeur"
+ ram = "RAM"
+ battery_capacity = "Capacité de la batterie"
++capacity_pair = "Conception {design} / réelle {actual}"
+ screen_size = "Taille de l’écran"
+ resolution = "Résolution"
+ os_version = "Version de l’OS"
 diff --git a/crates/skyward-ui/locales/id.toml b/crates/skyward-ui/locales/id.toml
-index 46c7fca..a4063e7 100644
+index 46c7fca..f45f8b4 100644
 --- a/crates/skyward-ui/locales/id.toml
 +++ b/crates/skyward-ui/locales/id.toml
 @@ -415,6 +415,7 @@ ip_address = "Alamat IP"
@@ -923,8 +955,16 @@ index 46c7fca..a4063e7 100644
  generation = "Wi-Fi {n}"
  off = "Nonaktif"
  turning_on = "Mengaktifkan"
+@@ -636,6 +637,7 @@ model = "Model"
+ processor = "Prosesor"
+ ram = "RAM"
+ battery_capacity = "Kapasitas baterai"
++capacity_pair = "Desain {design} / nyata {actual}"
+ screen_size = "Ukuran layar"
+ resolution = "Resolusi"
+ os_version = "Versi OS"
 diff --git a/crates/skyward-ui/locales/it.toml b/crates/skyward-ui/locales/it.toml
-index 2d1fa41..61c4776 100644
+index 2d1fa41..3106133 100644
 --- a/crates/skyward-ui/locales/it.toml
 +++ b/crates/skyward-ui/locales/it.toml
 @@ -421,6 +421,7 @@ ip_address = "Indirizzo IP"
@@ -935,8 +975,16 @@ index 2d1fa41..61c4776 100644
  generation = "Wi-Fi {n}"
  off = "Disattivato"
  turning_on = "Attivazione in corso"
+@@ -646,6 +647,7 @@ model = "Modello"
+ processor = "Processore"
+ ram = "RAM"
+ battery_capacity = "Capacità batteria"
++capacity_pair = "Progetto {design} / reale {actual}"
+ screen_size = "Dimensioni schermo"
+ resolution = "Risoluzione"
+ os_version = "Versione OS"
 diff --git a/crates/skyward-ui/locales/ja.toml b/crates/skyward-ui/locales/ja.toml
-index 9f72bef..c0d5d26 100644
+index 9f72bef..bffac70 100644
 --- a/crates/skyward-ui/locales/ja.toml
 +++ b/crates/skyward-ui/locales/ja.toml
 @@ -415,6 +415,7 @@ ip_address = "IP アドレス"
@@ -947,8 +995,16 @@ index 9f72bef..c0d5d26 100644
  generation = "Wi-Fi {n}"
  off = "オフ"
  turning_on = "オンにしています"
+@@ -636,6 +637,7 @@ model = "モデル"
+ processor = "プロセッサ"
+ ram = "RAM"
+ battery_capacity = "バッテリー容量"
++capacity_pair = "設計 {design} / 実際 {actual}"
+ screen_size = "画面サイズ"
+ resolution = "解像度"
+ os_version = "OS バージョン"
 diff --git a/crates/skyward-ui/locales/pl.toml b/crates/skyward-ui/locales/pl.toml
-index 0dd4256..b684948 100644
+index 0dd4256..c45a2a5 100644
 --- a/crates/skyward-ui/locales/pl.toml
 +++ b/crates/skyward-ui/locales/pl.toml
 @@ -424,6 +424,7 @@ ip_address = "Adres IP"
@@ -959,8 +1015,16 @@ index 0dd4256..b684948 100644
  generation = "Wi-Fi {n}"
  off = "Wyłączone"
  turning_on = "Włączanie"
+@@ -651,6 +652,7 @@ model = "Model"
+ processor = "Procesor"
+ ram = "RAM"
+ battery_capacity = "Pojemność baterii"
++capacity_pair = "Projektowa {design} / rzeczywista {actual}"
+ screen_size = "Rozmiar ekranu"
+ resolution = "Rozdzielczość"
+ os_version = "Wersja OS"
 diff --git a/crates/skyward-ui/locales/pt-BR.toml b/crates/skyward-ui/locales/pt-BR.toml
-index a86ac17..4810d25 100644
+index a86ac17..76a74ac 100644
 --- a/crates/skyward-ui/locales/pt-BR.toml
 +++ b/crates/skyward-ui/locales/pt-BR.toml
 @@ -421,6 +421,7 @@ ip_address = "Endereço IP"
@@ -971,8 +1035,16 @@ index a86ac17..4810d25 100644
  generation = "Wi-Fi {n}"
  off = "Desativado"
  turning_on = "Ativando"
+@@ -646,6 +647,7 @@ model = "Modelo"
+ processor = "Processador"
+ ram = "RAM"
+ battery_capacity = "Capacidade da bateria"
++capacity_pair = "Projeto {design} / real {actual}"
+ screen_size = "Tamanho da tela"
+ resolution = "Resolução"
+ os_version = "Versão do SO"
 diff --git a/crates/skyward-ui/locales/ru.toml b/crates/skyward-ui/locales/ru.toml
-index 2dd8f4d..844e45a 100644
+index 2dd8f4d..db40429 100644
 --- a/crates/skyward-ui/locales/ru.toml
 +++ b/crates/skyward-ui/locales/ru.toml
 @@ -424,6 +424,7 @@ ip_address = "IP-адрес"
@@ -983,8 +1055,16 @@ index 2dd8f4d..844e45a 100644
  generation = "Wi-Fi {n}"
  off = "Выключен"
  turning_on = "Включение"
+@@ -651,6 +652,7 @@ model = "Модель"
+ processor = "Процессор"
+ ram = "Оперативная память"
+ battery_capacity = "Ёмкость батареи"
++capacity_pair = "Проектная {design} / фактическая {actual}"
+ screen_size = "Размер экрана"
+ resolution = "Разрешение"
+ os_version = "Версия ОС"
 diff --git a/crates/skyward-ui/locales/tr.toml b/crates/skyward-ui/locales/tr.toml
-index f9f9275..c5544ae 100644
+index f9f9275..e4661ca 100644
 --- a/crates/skyward-ui/locales/tr.toml
 +++ b/crates/skyward-ui/locales/tr.toml
 @@ -418,6 +418,7 @@ ip_address = "IP adresi"
@@ -995,8 +1075,16 @@ index f9f9275..c5544ae 100644
  generation = "Wi-Fi {n}"
  off = "Kapalı"
  turning_on = "Açılıyor"
+@@ -641,6 +642,7 @@ model = "Model"
+ processor = "İşlemci"
+ ram = "RAM"
+ battery_capacity = "Pil kapasitesi"
++capacity_pair = "Tasarım {design} / gerçek {actual}"
+ screen_size = "Ekran boyutu"
+ resolution = "Çözünürlük"
+ os_version = "OS sürümü"
 diff --git a/crates/skyward-ui/locales/uk.toml b/crates/skyward-ui/locales/uk.toml
-index 0a54822..2c69b7b 100644
+index 0a54822..479e78c 100644
 --- a/crates/skyward-ui/locales/uk.toml
 +++ b/crates/skyward-ui/locales/uk.toml
 @@ -424,6 +424,7 @@ ip_address = "IP-адреса"
@@ -1007,8 +1095,16 @@ index 0a54822..2c69b7b 100644
  generation = "Wi-Fi {n}"
  off = "Вимкнено"
  turning_on = "Увімкнення"
+@@ -651,6 +652,7 @@ model = "Модель"
+ processor = "Процесор"
+ ram = "Оперативна пам’ять"
+ battery_capacity = "Ємність акумулятора"
++capacity_pair = "Проєктна {design} / фактична {actual}"
+ screen_size = "Розмір екрана"
+ resolution = "Роздільна здатність"
+ os_version = "Версія ОС"
 diff --git a/crates/skyward-ui/locales/vi.toml b/crates/skyward-ui/locales/vi.toml
-index 9fdec82..e74cdd5 100644
+index 9fdec82..4bcbd58 100644
 --- a/crates/skyward-ui/locales/vi.toml
 +++ b/crates/skyward-ui/locales/vi.toml
 @@ -418,6 +418,7 @@ ip_address = "Địa chỉ IP"
@@ -1019,8 +1115,16 @@ index 9fdec82..e74cdd5 100644
  generation = "Wi-Fi {n}"
  off = "Tắt"
  turning_on = "Đang bật"
+@@ -641,6 +642,7 @@ model = "Kiểu máy"
+ processor = "Bộ xử lý"
+ ram = "RAM"
+ battery_capacity = "Dung lượng pin"
++capacity_pair = "Thiết kế {design} / thực tế {actual}"
+ screen_size = "Kích thước màn hình"
+ resolution = "Độ phân giải"
+ os_version = "Phiên bản OS"
 diff --git a/crates/skyward-ui/locales/zh-Hans.toml b/crates/skyward-ui/locales/zh-Hans.toml
-index 6695b0d..cccf315 100644
+index 6695b0d..442e247 100644
 --- a/crates/skyward-ui/locales/zh-Hans.toml
 +++ b/crates/skyward-ui/locales/zh-Hans.toml
 @@ -415,6 +415,7 @@ ip_address = "IP 地址"
@@ -1031,8 +1135,16 @@ index 6695b0d..cccf315 100644
  generation = "第{n}代"
  off = "已关闭"
  turning_on = "正在开启"
+@@ -636,6 +637,7 @@ model = "设备型号"
+ processor = "处理器"
+ ram = "运行内存"
+ battery_capacity = "电池容量"
++capacity_pair = "设计 {design} / 实际 {actual}"
+ screen_size = "屏幕尺寸"
+ resolution = "分辨率"
+ os_version = "OS 版本"
 diff --git a/crates/skyward-ui/locales/zh-Hant.toml b/crates/skyward-ui/locales/zh-Hant.toml
-index 14b4f8f..ca1d732 100644
+index 14b4f8f..9b5cc2a 100644
 --- a/crates/skyward-ui/locales/zh-Hant.toml
 +++ b/crates/skyward-ui/locales/zh-Hant.toml
 @@ -415,6 +415,7 @@ ip_address = "IP 位址"
@@ -1043,6 +1155,14 @@ index 14b4f8f..ca1d732 100644
  generation = "第{n}代"
  off = "已關閉"
  turning_on = "正在開啟"
+@@ -636,6 +637,7 @@ model = "裝置型號"
+ processor = "處理器"
+ ram = "記憶體"
+ battery_capacity = "電池容量"
++capacity_pair = "設計 {design} / 實際 {actual}"
+ screen_size = "螢幕尺寸"
+ resolution = "解析度"
+ os_version = "OS 版本"
 diff --git a/crates/skyward-ui/src/app/act.rs b/crates/skyward-ui/src/app/act.rs
 index ab776c0..76612c8 100644
 --- a/crates/skyward-ui/src/app/act.rs
@@ -1329,7 +1449,7 @@ index efe3e54..452f132 100644
      fn a_networks_round_button_opens_its_details_and_its_row_joins_it() {
          let (f, i) = (fonts(), info());
 diff --git a/crates/skyward-ui/src/pages.rs b/crates/skyward-ui/src/pages.rs
-index fee3424..4e3916e 100644
+index fee3424..e3400ad 100644
 --- a/crates/skyward-ui/src/pages.rs
 +++ b/crates/skyward-ui/src/pages.rs
 @@ -21,6 +21,7 @@ use crate::widgets::{self, Caption, Detail, Fact, Outline, Row, Spec, SystemCard
@@ -1340,7 +1460,17 @@ index fee3424..4e3916e 100644
  use skyward_net::supplicant::Security;
  use skyward_net::wlan::{Bands, Network, Power, Stage as Joining};
  use skyward_systems::{Held, Who};
-@@ -2491,6 +2492,42 @@ pub fn wlan(cx: &Ctx) -> Frame {
+@@ -591,6 +592,9 @@ pub fn specs(cx: &Ctx) -> Frame {
+ 
+     if let Some(b) = &i.battery {
+         let mut rows = vec![(l.pick(texts::specs::LEVEL), fmt::level(l, b))];
++        if let (Some(design), Some(full)) = (b.design, b.full) {
++            rows.push((l.pick(texts::specs::BATTERY_CAPACITY), texts::specs::capacity_pair(l, fmt::mah(design), fmt::mah(full))));
++        }
+         if let Some(v) = b.temp {
+             rows.push((l.pick(texts::specs::TEMPERATURE), fmt::celsius(v)));
+         }
+@@ -2491,6 +2495,42 @@ pub fn wlan(cx: &Ctx) -> Frame {
                      y = widgets::footnote(&mut c, t, f, y, &note);
                  }
              }
@@ -1383,7 +1513,7 @@ index fee3424..4e3916e 100644
              let others: Vec<(usize, &Network)> =
                  w.networks.iter().enumerate().filter(|(_, n)| w.joined.as_ref().is_none_or(|j| j.ssid != n.ssid)).collect();
              let (below, rescan) = widgets::section_action(&mut c, t, f, y, l.pick(texts::wlan::NEARBY), l.pick(texts::wlan::REFRESH));
-@@ -2608,13 +2645,24 @@ pub fn wlan_network(cx: &Ctx) -> Frame {
+@@ -2608,13 +2648,24 @@ pub fn wlan_network(cx: &Ctx) -> Frame {
      let signal = l.pick(texts::wlan::SIGNAL_STRENGTH);
      let title = l.pick(texts::wlan::DETAILS);
      let Some(j) = joined else {
