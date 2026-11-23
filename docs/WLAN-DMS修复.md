@@ -72,3 +72,32 @@ adb reboot
 - 系统 OTA 会重写 `vendor_boot_a`，升级后重新刷一次即可；recovery 镜像不用重刷。
 - 系统启动也用这份模块：MAC 改为从 `persist/wlan_mac.bin` 取，实测联网正常、MAC 不变。
 - 只刷 recovery、不刷 vendor_boot：WLAN 仍会等 11 秒（约 28 秒联网）。
+
+## 按自己机器的 vendor_boot 打补丁（推荐给其他版本）
+
+`tools/patch_vendor_boot.py` 会自己解开镜像里的 ramdisk、找到这段循环、改 4 字节，
+再用 LZ4 HC 压回原长度，镜像其余部分一字不动：
+
+```bash
+pip install lz4
+python tools/patch_vendor_boot.py vendor_boot.img vendor_boot-dmsfix.img
+```
+
+`vendor_boot.img` 从自己手机 dump（recovery 里 root adb）：
+
+```bash
+adb shell su -c 'dd if=/dev/block/by-name/vendor_boot_a of=/sdcard/vendor_boot.img bs=1M'
+adb pull /sdcard/vendor_boot.img
+```
+
+写完的镜像刷回：
+
+```bash
+adb push vendor_boot-dmsfix.img /sdcard/
+adb shell su -c 'dd if=/sdcard/vendor_boot-dmsfix.img of=/dev/block/by-name/vendor_boot_a bs=1M && sync'
+adb reboot
+```
+
+脚本会打印 `patched cnss2 ... movz #200 -> #1` 并自检（重新解压、确认 4 字节生效）。
+换系统版本、换机型都可能让循环偏移变化，脚本是按指令特征定位的，不依赖固定偏移；
+万一找不到会直接报错，不会写坏镜像。

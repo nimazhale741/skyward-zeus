@@ -22,6 +22,7 @@ scripts/setup.sh      拉 v0.5.0、打补丁、放配置
 scripts/pack-zeus.sh  把编译产物打成 100 MiB recovery 镜像
 scripts/release-zeus.sh 编 + 打包 + 压 zip + 发布
 docs/                 刷入说明、运行逻辑、WLAN DMS 修复
+tools/patch_vendor_boot.py  给任意 zeus 的 vendor_boot 自动打 cnss2 补丁
 ```
 
 ## 构建
@@ -45,7 +46,7 @@ release 里有两个镜像，**先备份再刷**：
 | 文件 | 刷到 | 说明 |
 | --- | --- | --- |
 | `skyward-v0.5.0-zeus.img` | `recovery_a` | 100 MiB 整块，不碰系统/数据 |
-| `vendor_boot-v0.5.0-zeus-OS4.0.0.44.XPBCNXM.img` | `vendor_boot_a` | 修 WLAN 11 秒等待；**只有同系统版本才能用** |
+| `vendor_boot-v0.5.0-zeus-OS4.0.0.44.XPBCNXM.img` | `vendor_boot_a` | 修 WLAN 11 秒等待；**只有同系统版本才能用**（其他版本用 `tools/patch_vendor_boot.py` 打自己的） |
 
 ```powershell
 adb reboot bootloader
