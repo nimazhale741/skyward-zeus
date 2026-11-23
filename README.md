@@ -72,6 +72,7 @@ adb reboot recovery
 
 ## 已知行为
 
+- 重启菜单里的 **用户空间 fastbootd**（或 `adb reboot fastboot`）可用：进入后 `fastboot devices` 能看到设备。
 - WLAN 页初始为“关”；芯片后台预热，未打 vendor_boot 补丁时约 26 秒就绪，打了约 15 秒；点开开关 1~2 秒出列表。
 - 触摸固件 `st_fts_l2.ftb` 未打包：驱动自动更新失败两次，触摸本身正常。
 - `aw8697_rtp_1.bin` 未打包：只影响 RTP 音效，点击震动正常。

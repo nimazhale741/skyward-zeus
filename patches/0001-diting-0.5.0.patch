@@ -1454,7 +1454,7 @@ index ab27c29..db4c9e0 100644
              }
              Ok(())
 diff --git a/crates/skyward/src/haptics.rs b/crates/skyward/src/haptics.rs
-index 43e241f..e7223e2 100644
+index 43e241f..2ec6567 100644
 --- a/crates/skyward/src/haptics.rs
 +++ b/crates/skyward/src/haptics.rs
 @@ -18,6 +18,10 @@ const FF_CUSTOM: u16 = 0x5d;
@@ -1486,6 +1486,22 @@ index 43e241f..e7223e2 100644
          play(&mut self.dev, loaded.slot).context("play the click")?;
          self.clicks += 1;
          let this = (loaded.slot, self.clicks);
+@@ -154,7 +167,14 @@ fn takes_periodic(dev: &RawDevice) -> bool {
+ /// The motor's resonant frequency in hertz, from the file the driver says
+ /// it in, in tenths of a hertz.
+ fn resonance(file: &str) -> Result<f32> {
+-    let text = fs::read_to_string(file).with_context(|| format!("read {file}"))?;
++    // fastbootd runs without the phone's partitions mounted, so the file the
++    // calibration lives in is not there yet; the motor still answers touches
++    // while the screen waits, at the rate most of these motors swing at.
++    let text = match fs::read_to_string(file) {
++        Ok(text) => text,
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(200.0),
++        Err(e) => return Err(e).with_context(|| format!("read {file}")),
++    };
+     let tenths: u32 = text.split_whitespace().next().and_then(|n| n.parse().ok()).with_context(|| format!("{file} holds {text:?}"))?;
+     ensure!(tenths > 0, "{file} says the motor swings at 0 Hz");
+     Ok(tenths as f32 / 10.0)
 diff --git a/crates/skyward/src/input.rs b/crates/skyward/src/input.rs
 index 4a9d65c..c4f88f4 100644
 --- a/crates/skyward/src/input.rs
