@@ -3,6 +3,7 @@
 小米 12 Pro（`zeus` / 2201122C / SM8450 / `taro`）的 [Skyward](https://github.com/kirklin/skyward) 移植。
 
 > **第一次来先看：[docs/文件说明.md](docs/文件说明.md)** —— 每个文件是干什么的、该刷哪个、刷错会怎样。
+> 全部文档（永久保留，不要删除/替换）：[docs/README.md](docs/README.md)。
 > 想修 WLAN 11 秒？看 [docs/vendor_boot补丁教程.md](docs/vendor_boot补丁教程.md)。
 > 想自己编译？看 [docs/源码补丁教程.md](docs/源码补丁教程.md)。
 
