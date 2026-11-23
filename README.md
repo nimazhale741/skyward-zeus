@@ -75,8 +75,6 @@ adb reboot recovery
 
 - 重启菜单里的 **用户空间 fastbootd**（或 `adb reboot fastboot`）可用：进入后 `fastboot devices` 能看到设备。
 - WLAN 页初始为“关”；芯片后台预热，未打 vendor_boot 补丁时约 26 秒就绪，打了约 15 秒；点开开关 1~2 秒出列表。
-- 触摸固件 `st_fts_l2.ftb`：这台机器的 ROM 本身没有这个文件（全部分区搜过），不是漏打包；驱动会回退到控制器自带的固件，触摸正常。
-- `aw8697_rtp_1.bin`：ROM 同样没有提供；只影响 RTP 波形音效，点击/铃声震动用的是已打包的 `aw8697_haptic.bin`。
 - 界面语言跟随系统（15 种）。
 
 ## 许可
