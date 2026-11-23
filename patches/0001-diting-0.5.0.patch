@@ -2490,7 +2490,7 @@ index 52b8d47..209929a 100644
      for (name, value) in &given.environment {
          match name == LIBRARY_PATH {
 diff --git a/crates/skyward/src/ui.rs b/crates/skyward/src/ui.rs
-index 06374c8..36ce6c1 100644
+index 06374c8..fcaef05 100644
 --- a/crates/skyward/src/ui.rs
 +++ b/crates/skyward/src/ui.rs
 @@ -1117,8 +1117,23 @@ pub fn run(cfg: &DeviceConfig, programs: &[Service], font: &Path, mono: &Path, r
@@ -2535,7 +2535,35 @@ index 06374c8..36ce6c1 100644
              backlight,
              keeper,
              shown_clock: String::new(),
-@@ -1664,16 +1682,28 @@ impl<'a> Pages<'a> {
+@@ -1562,16 +1580,24 @@ impl<'a> Pages<'a> {
+             }
+             self.app.set_update(standing);
+         }
+-        // The WLAN starts off. Without the bundle of the vendor interface's
+-        // libraries the supplicant does not start, and the WLAN page says why.
++        // The WLAN starts on, the chip having been brought up ahead of it:
++        // the page shows it turning on, and the network the phone holds is
++        // joined without the switch being touched. Without the bundle of the
++        // vendor interface's libraries the supplicant does not start, and the
++        // WLAN page says why.
+         if let Some(w) = &cfg.wlan {
+-            self.app.state.wlan = Some(Wlan::default());
++            self.app.state.wlan = Some(Wlan { power: WlanPower::Starting, ..Wlan::default() });
+             let modules = cfg.modules.sources.iter().map(|s| skyward_modules::source_dir(s)).collect::<Result<Vec<_>>>()?;
+             let libraries = secure::libraries().unwrap_or_else(|e| {
+                 let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
+                 None
+             });
+             self.wlan = Some(wlan::Worker::start(w.clone(), modules, libraries, self.servers.clone())?);
++            if !self.fastboot {
++                if let Some(worker) = &self.wlan {
++                    worker.send(wlan::Command::On);
++                }
++            }
+         }
+         self.scanned_at = Instant::now();
+         self.app.state.update_server = cfg.update.is_some();
+@@ -1664,16 +1690,28 @@ impl<'a> Pages<'a> {
  
      /// One click of the motor, as strong as the settings say.
      fn click(&mut self) -> Result<()> {
@@ -2568,7 +2596,7 @@ index 06374c8..36ce6c1 100644
          }
          Ok(())
      }
-@@ -2641,6 +2671,7 @@ impl Pages<'_> {
+@@ -2641,6 +2679,7 @@ impl Pages<'_> {
                  wlan_worker(&self.wlan)?.send(wlan::Command::Join { ssid, name, security, password: password.0 })
              }
              Effect::LeaveWlan => wlan_worker(&self.wlan)?.send(wlan::Command::Leave),
@@ -2605,7 +2633,7 @@ index b5f0dae..72b2ae0 100644
                          }
                          located_again = true;
 diff --git a/crates/skyward/src/wlan.rs b/crates/skyward/src/wlan.rs
-index 734a499..eb0a240 100644
+index 734a499..234c020 100644
 --- a/crates/skyward/src/wlan.rs
 +++ b/crates/skyward/src/wlan.rs
 @@ -4,11 +4,13 @@
@@ -2622,16 +2650,20 @@ index 734a499..eb0a240 100644
  use skyward_net::supplicant::{self, Bss, Control, Event as Told, Security};
  use skyward_net::wlan::{self, Joined, Link, Next, Power, Stage, Traffic, Wlan};
  use skyward_sys::worker::{self, Teller};
-@@ -40,7 +42,7 @@ const WIFI: u32 = 1010;
+@@ -40,7 +42,11 @@ const WIFI: u32 = 1010;
  
  /// How long the driver may take to make its interface, the chip's firmware
  /// loading meanwhile.
 -const INTERFACE_WAIT: Duration = Duration::from_secs(20);
 +const INTERFACE_WAIT: Duration = Duration::from_secs(45);
++
++/// One bring-up at a time: the prewarm thread and the page turning the
++/// switch on both ask for it, and the second waits for the first.
++static BRING_UP: std::sync::Mutex<()> = std::sync::Mutex::new(());
  
  /// How long the supplicant may take to open its control socket.
  const SOCKET_WAIT: Duration = Duration::from_secs(10);
-@@ -64,6 +66,9 @@ pub enum Command {
+@@ -64,6 +70,9 @@ pub enum Command {
      Off,
      Scan,
      Join { ssid: Vec<u8>, name: String, security: Security, password: String },
@@ -2641,7 +2673,7 @@ index 734a499..eb0a240 100644
      Leave,
  }
  
-@@ -106,7 +111,8 @@ impl Worker {
+@@ -106,7 +115,8 @@ impl Worker {
          let (inbox, asked) = worker::telling().context("make the WLAN thread's inbox")?;
          let back = inbox.clone();
          let worker = worker::Worker::start("wlan", move |tell| {
@@ -2651,7 +2683,7 @@ index 734a499..eb0a240 100644
              s.run(&asked);
          })?;
          Ok(Worker { inbox, worker })
-@@ -200,6 +206,12 @@ struct Station {
+@@ -200,6 +210,12 @@ struct Station {
      servers: Servers,
      state: Wlan,
      running: Option<Running>,
@@ -2664,7 +2696,7 @@ index 734a499..eb0a240 100644
      /// What a thread asking for an address, or looking how far the
      /// network reaches, answers to: the thread's own inbox.
      back: Teller<Inbox>,
-@@ -259,6 +271,7 @@ impl Station {
+@@ -259,6 +275,7 @@ impl Station {
              }
              Command::Join { ssid, name, security, password } => {
                  self.unaddress();
@@ -2672,7 +2704,7 @@ index 734a499..eb0a240 100644
                  let mut joined = Joined { ssid, name, security, stage: Stage::Joining };
                  if let Err(e) = self.join(&joined, &password) {
                      let _ = skyward_sys::kmsg(&format!("joining {} failed: {e:#}", joined.name));
-@@ -266,8 +279,36 @@ impl Station {
+@@ -266,8 +283,36 @@ impl Station {
                  }
                  self.state.joined = Some(joined);
              }
@@ -2709,7 +2741,7 @@ index 734a499..eb0a240 100644
                  if let Some(r) = &self.running
                      && let Err(e) = r.control.order("REMOVE_NETWORK all")
                  {
-@@ -297,9 +338,10 @@ impl Station {
+@@ -297,9 +342,10 @@ impl Station {
          }
      }
  
@@ -2722,7 +2754,7 @@ index 734a499..eb0a240 100644
          let socket = Path::new(HOME).join("sockets").join(&self.cfg.interface);
          let connected = (|| -> Result<(Control, Control)> {
              let control = Control::open(&socket)?;
-@@ -334,6 +376,7 @@ impl Station {
+@@ -334,6 +380,7 @@ impl Station {
  
      fn off(&mut self) {
          self.unaddress();
@@ -2730,7 +2762,7 @@ index 734a499..eb0a240 100644
          if let Some(mut r) = self.running.take() {
              end(&mut r.child, Some(&r.control));
          }
-@@ -401,8 +444,26 @@ impl Station {
+@@ -401,8 +448,26 @@ impl Station {
      }
  
      fn joining(&mut self, told: &Told) {
@@ -2759,7 +2791,7 @@ index 734a499..eb0a240 100644
              Next::Show => {}
              Next::Address => self.ask_address(),
              Next::Unaddress => self.unaddress(),
-@@ -414,6 +475,63 @@ impl Station {
+@@ -414,6 +479,63 @@ impl Station {
                  }
              }
          }
@@ -2823,7 +2855,7 @@ index 734a499..eb0a240 100644
      }
  
      /// Ask the network for an address, on a thread of its own.
-@@ -620,6 +738,15 @@ impl Station {
+@@ -620,9 +742,19 @@ impl Station {
      }
  }
  
@@ -2839,7 +2871,11 @@ index 734a499..eb0a240 100644
  /// Load the driver where its interface is not there yet, and bring the
  /// interface up.
  fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
-@@ -672,8 +799,31 @@ fn place(file: &Firmware) -> Result<()> {
++    let _bringing_up = BRING_UP.lock().unwrap_or_else(|e| e.into_inner());
+     let net = Path::new("/sys/class/net").join(&cfg.interface);
+     if !net.exists() {
+         for file in &cfg.firmware {
+@@ -672,8 +804,31 @@ fn place(file: &Firmware) -> Result<()> {
      }
  }
  
@@ -2872,7 +2908,7 @@ index 734a499..eb0a240 100644
      let home = Path::new(HOME);
      let sockets = home.join("sockets");
      fs::create_dir_all(&sockets).with_context(|| format!("make {}", sockets.display()))?;
-@@ -681,8 +831,24 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
+@@ -681,8 +836,24 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
      std::os::unix::fs::chown(&sockets, Some(WIFI), Some(WIFI)).with_context(|| format!("give {} to the supplicant", sockets.display()))?;
      fs::set_permissions(&sockets, fs::Permissions::from_mode(0o770)).with_context(|| format!("keep {} to the supplicant", sockets.display()))?;
      let settings = home.join("wpa_supplicant.conf");
@@ -2899,7 +2935,7 @@ index 734a499..eb0a240 100644
      fs::set_permissions(&settings, fs::Permissions::from_mode(0o644)).with_context(|| format!("open {} to the supplicant", settings.display()))?;
      let socket = sockets.join(&cfg.interface);
      // One an earlier run left would answer nothing.
-@@ -693,6 +859,11 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
+@@ -693,6 +864,11 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
      if let Some(dir) = libraries {
          path.push(dir.to_string_lossy().into_owned());
      }
@@ -2911,7 +2947,7 @@ index 734a499..eb0a240 100644
      let mut child = Process::new(&cfg.supplicant)
          .args(["-i", &cfg.interface, "-D", "nl80211", "-c"])
          .arg(&settings)
-@@ -700,7 +871,10 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
+@@ -700,7 +876,10 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
          .current_dir("/")
          .stdin(Stdio::null())
          .stdout(Stdio::null())
