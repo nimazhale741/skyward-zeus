@@ -1843,7 +1843,7 @@ index f4b7775..ec6313b 100644
  pub fn describe(steps: &[Step]) -> Vec<String> {
      let mut lines = Vec::new();
 diff --git a/crates/skyward/src/main.rs b/crates/skyward/src/main.rs
-index cd4cad8..eb32f56 100644
+index cd4cad8..99fca52 100644
 --- a/crates/skyward/src/main.rs
 +++ b/crates/skyward/src/main.rs
 @@ -225,6 +225,13 @@ enum Cmd {
@@ -1915,7 +1915,7 @@ index cd4cad8..eb32f56 100644
  }
  
  /// Start the recovery's own logd where it needs libraries of the installed
-@@ -549,9 +600,66 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
+@@ -549,9 +600,56 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
          let at = skyward_block::fstab::mount(name)?;
          skyward_sys::kmsg(&format!("{name} is mounted on {}", at.display()))?;
      }
@@ -1960,16 +1960,6 @@ index cd4cad8..eb32f56 100644
 +    // the better part of ten seconds, which its user would wait at the
 +    // switch. On its own thread, so a chip that is slow to start holds up
 +    // nothing but itself.
-+    // The image may carry a module of its own in place of one of the
-+    // phone's: the stock cnss2 waits for a modem this recovery has none of.
-+    let carried = std::path::Path::new("/skyward/cnss2.ko");
-+    if carried.exists() {
-+        let target = "/vendor/lib/modules/cnss2.ko";
-+        let status = std::process::Command::new("/vendor/bin/sh")
-+            .args(["-c", &format!("mount --bind {} {}", carried.display(), target)])
-+            .status();
-+        skyward_sys::kmsg(&format!("the image's own cnss2 is put in place of the phone's: {status:?}"))?;
-+    }
 +    if let Some(wlan) = &cfg.wlan
 +        && wlan.prewarm
 +    {
@@ -1983,7 +1973,7 @@ index cd4cad8..eb32f56 100644
      if !cfg.owners.is_empty() {
          let handed = hand_over(&cfg.owners)?;
          skyward_sys::kmsg(&format!("{handed} of the phone's own files handed to the accounts its init gives them"))?;
-@@ -591,8 +699,15 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
+@@ -591,8 +689,15 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
      let mut told = registering.clone();
      told.extend(described.into_iter().filter(|name| !registering.contains(name)));
      if !told.is_empty() {
