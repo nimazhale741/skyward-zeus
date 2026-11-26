@@ -153,6 +153,34 @@ index 2b521a9..8192070 100644
      let mut read = reply.read();
      status::ok(&mut read).with_context(|| format!("ask whether {name} is described"))?;
      read.bool().with_context(|| format!("read whether {name} is described"))
+diff --git a/crates/skyward-block/src/mount.rs b/crates/skyward-block/src/mount.rs
+index 7e92ce7..2f3dcc4 100644
+--- a/crates/skyward-block/src/mount.rs
++++ b/crates/skyward-block/src/mount.rs
+@@ -445,8 +445,23 @@ mod sys {
+         under_parked(target, umount_detach)
+     }
+ 
++    /// Whether the mount on `target` is shared, which keeps it from being
++    /// unmounted while anything else can see it.
++    fn is_shared(target: &Path) -> Result<bool> {
++        Ok(mounts()?.iter().any(|m| {
++            m.mount_point == target && m.opt_fields.iter().any(|f| matches!(f, MountOptFields::Shared(_)))
++        }))
++    }
++
+     fn under_parked(target: &Path, unmount: fn(&Path) -> Result<()>) -> Result<()> {
+         let mut parked = park(target)?;
++        // A mount made below a shared parent is shared itself, and the
++        // kernel will not unmount a shared mount: make it private first, as
++        // park does for the parents of the mounts it moves.
++        if is_shared(target)? {
++            remount(target, libc::MS_PRIVATE, "private")?;
++            parked.privatized.push(target.to_path_buf());
++        }
+         if let Err(e) = unmount(target) {
+             unpark(parked).with_context(|| format!("after {e:#}"))?;
+             return Err(e);
 diff --git a/crates/skyward-config/src/lib.rs b/crates/skyward-config/src/lib.rs
 index c5eda3d..2956de2 100644
 --- a/crates/skyward-config/src/lib.rs
@@ -1992,10 +2020,21 @@ index cd4cad8..99fca52 100644
      let libraries = secure::libraries()?;
      if let Some(dir) = &libraries {
 diff --git a/crates/skyward/src/secure.rs b/crates/skyward/src/secure.rs
-index deefa91..0a4b263 100644
+index deefa91..7ceb2f2 100644
 --- a/crates/skyward/src/secure.rs
 +++ b/crates/skyward/src/secure.rs
-@@ -33,7 +33,6 @@ const PHONE_DESCRIPTION: &str = "phone.xml";
+@@ -19,6 +19,10 @@ const BUNDLE_IMAGE: &str = "apex_payload.img";
+ /// Where Android opens its bundles, and the directory of 64-bit libraries
+ /// inside one.
+ const BUNDLE_MOUNT: &str = "/apex";
++
++/// Where the bundles are copied to before they are mounted, away from the
++/// installed system an install takes off.
++const BUNDLE_COPY: &str = "/tmp/skyward-bundles";
+ const BUNDLE_LIBS: &str = "lib64";
+ 
+ /// Which build of the vendor interface the phone's own partitions were
+@@ -33,7 +37,6 @@ const PHONE_DESCRIPTION: &str = "phone.xml";
  
  /// The name init knows the service directory by, and the program it runs.
  const DIRECTORY_SERVICE: &str = "servicemanager";
@@ -2003,7 +2042,7 @@ index deefa91..0a4b263 100644
  
  /// Where init says which process each of its services runs as, one
  /// property per service, the service's name following this.
-@@ -54,9 +53,108 @@ const BUNDLE_LOADER: &str = "bin/linker64";
+@@ -54,9 +57,108 @@ const BUNDLE_LOADER: &str = "bin/linker64";
  
  /// Which programs may register which hardware services, and where the
  /// directory for those services looks for that.
@@ -2113,7 +2152,7 @@ index deefa91..0a4b263 100644
  /// The driver the phone's hardware services talk over, as they expect to
  /// find it and as a recovery has it.
  const HARDWARE_DRIVER: &str = "/dev/hwbinder";
-@@ -66,6 +164,14 @@ const HARDWARE_DRIVER_NODE: &str = "/dev/binderfs/hwbinder";
+@@ -66,6 +168,14 @@ const HARDWARE_DRIVER_NODE: &str = "/dev/binderfs/hwbinder";
  /// itself off when the running system does not describe it.
  const HARDWARE_DIRECTORY: &str = "android.hidl.manager@1.2::IServiceManager/default";
  
@@ -2128,7 +2167,7 @@ index deefa91..0a4b263 100644
  /// What says the directory is off. It is read by the services, and in a
  /// recovery there is nothing else to set it.
  const DIRECTORY_OFF: &str = "hwservicemanager.disabled";
-@@ -85,6 +191,7 @@ const RECOVERY_MANIFEST: &str = "/system/etc/vintf/manifest.xml";
+@@ -85,6 +195,7 @@ const RECOVERY_MANIFEST: &str = "/system/etc/vintf/manifest.xml";
  ///
  /// `wanted` names the hardware services that will be asked for.
  pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
@@ -2136,7 +2175,7 @@ index deefa91..0a4b263 100644
      // A loader and the lowest libraries are built together and agree
      // between them on how a program's own storage is laid out, so the
      // installed system's programs are loaded by the installed system's
-@@ -116,15 +223,25 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
+@@ -116,15 +227,25 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
      // as the users their init scripts name.
      fs::set_permissions(driver, std::os::unix::fs::PermissionsExt::from_mode(0o666))
          .with_context(|| format!("open {HARDWARE_DRIVER} to every program"))?;
@@ -2165,7 +2204,7 @@ index deefa91..0a4b263 100644
      fs::write(RECOVERY_MANIFEST, describe_hardware(wanted)?).with_context(|| format!("write {RECOVERY_MANIFEST}"))?;
      fs::set_permissions(RECOVERY_MANIFEST, std::os::unix::fs::PermissionsExt::from_mode(0o644))
          .with_context(|| format!("let every user read {RECOVERY_MANIFEST}"))?;
-@@ -132,6 +249,13 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
+@@ -132,6 +253,13 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
      // description, and a run of it before this was written may have left
      // that behind.
      skyward_sys::set_prop(DIRECTORY_OFF, "false")?;
@@ -2179,7 +2218,27 @@ index deefa91..0a4b263 100644
      Ok(())
  }
  
-@@ -193,6 +317,113 @@ fn image(file: &Path) -> Result<(u64, u64)> {
+@@ -174,8 +302,17 @@ fn bundle(name: &str) -> Result<Option<PathBuf>> {
+     let Some(file) = BUNDLE_DIRS.iter().map(|d| Path::new(d).join(format!("{name}.apex"))).find(|p| p.is_file()) else {
+         return Ok(None);
+     };
+-    let (offset, length) = image(&file)?;
+-    let device = skyward_block::loopdev::attach(&file, offset, length)?;
++    // The bundle is copied off the installed system first: its loop device
++    // holds whatever file it was made on open, and an install cannot take
++    // the installed system's partitions off while one of their files is
++    // held that way.
++    let copied = Path::new(BUNDLE_COPY).join(format!("{name}.apex"));
++    if !copied.is_file() {
++        fs::create_dir_all(BUNDLE_COPY).with_context(|| format!("make {BUNDLE_COPY}"))?;
++        fs::copy(&file, &copied).with_context(|| format!("copy {} to {}", file.display(), copied.display()))?;
++    }
++    let (offset, length) = image(&copied)?;
++    let device = skyward_block::loopdev::attach(&copied, offset, length)?;
+     fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
+     skyward_block::mount::mount_ro(&device, &at)?;
+     Ok(Some(at))
+@@ -193,6 +330,113 @@ fn image(file: &Path) -> Result<(u64, u64)> {
      Ok((start, entry.size()))
  }
  
@@ -2293,7 +2352,7 @@ index deefa91..0a4b263 100644
  /// Tell the phone's service directory of the services in `wanted`, which
  /// the phone's own programs register and the recovery itself may serve.
  /// The directory turns away a hardware service the running system does
-@@ -233,6 +464,7 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
+@@ -233,6 +477,7 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
      // these. One an earlier run of the recovery service had start again
      // knows them already, and is left with what has registered with it
      // since.
@@ -2301,7 +2360,7 @@ index deefa91..0a4b263 100644
      let binder = skyward_binder::driver::Binder::open()?;
      // The first it does not know described settles that it starts again.
      let mut unknown = false;
-@@ -248,8 +480,12 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
+@@ -248,8 +493,12 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
          // those services again, as the installed system's init does
          // whenever its directory restarts.
          let registered = registered()?;
@@ -2316,7 +2375,7 @@ index deefa91..0a4b263 100644
          answering_again(was)?;
          register_again(&registered)?;
      }
-@@ -259,7 +495,7 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
+@@ -259,7 +508,7 @@ pub fn publish_descriptions(wanted: &[String]) -> Result<()> {
  /// What has registered with the service directory, each with the init
  /// service whose process serves it; the directory's own entry is left out.
  fn registered() -> Result<Vec<(String, String)>> {
@@ -2325,7 +2384,7 @@ index deefa91..0a4b263 100644
      let binder = skyward_binder::driver::Binder::open()?;
      let started = skyward_sys::props(SERVICE_PIDS);
      let mut out = Vec::new();
-@@ -337,7 +573,7 @@ fn say_framework(dir: &Path) -> Result<usize> {
+@@ -337,7 +586,7 @@ fn say_framework(dir: &Path) -> Result<usize> {
  fn answering_again(was: Option<u32>) -> Result<()> {
      let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
      loop {
