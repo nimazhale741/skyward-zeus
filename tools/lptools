@@ -1,0 +1,10 @@
+#!/system/bin/sh
+# 有些 ROM 的安装脚本（META-INF/bin/updateM）在刷完 super 后会调用
+#   lptools unmap system_a; lptools map system_a
+# 等命令刷新逻辑分区映射；官方 recovery 里没有这个命令，脚本 set -e 会
+# 直接以 127 退出。Skyward 的安装器在脚本运行前已经把当前 slot 的分区
+# 映射好并置为可写，所以 unmap/map 这里什么都不用做，返回成功即可。
+case "$1" in
+    unmap|map) exit 0 ;;
+esac
+exit 0

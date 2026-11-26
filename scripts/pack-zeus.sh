@@ -31,6 +31,8 @@ done
 # 震动：ramdisk 里 /etc 指向 /system/etc，ueventd 第一个搜索站是 /etc/firmware，
 # 放这里才不会被 modem 分区挂载的 /vendor/firmware 遮住。
 EXTRA="$EXTRA --extra $FIRMWARE:system/etc/firmware/aw8697_haptic.bin:0644"
+# 有些 ROM 的安装脚本会调用 lptools unmap/map；放一个兼容脚本，让它返回成功。
+EXTRA="$EXTRA --extra $ROOT/tools/lptools:system/bin/lptools:0755"
 
 mkdir -p "$(dirname "$OUT")"
 "$BASE/target/release/skyward-pack" recovery --stock "$STOCK" \

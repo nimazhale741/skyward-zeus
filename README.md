@@ -75,7 +75,8 @@ adb reboot recovery
 
 - 重启菜单里的 **用户空间 fastbootd**（或 `adb reboot fastboot`）可用：进入后 `fastboot devices` 能看到设备。
 - **rec 内在线更新**：检查与下载默认走 `v4.gh-proxy.org`（快），失败自动换 `gh-proxy.com`，再失败直连 GitHub；下载后仍校验 SHA-256。
-- WLAN 页初始为“关”；芯片后台预热，未打 vendor_boot 补丁时约 26 秒就绪，打了约 15 秒；点开开关 1~2 秒出列表。
+- **WLAN 默认开**：芯片后台预热，未打 vendor_boot 补丁时约 26 秒就绪，打了约 15 秒；就绪后自动起 supplicant、连已保存网络（实测 17 秒拿到 IP），不用点开关。
+- **ZIP 安装**：支持 Android OTA/updater-script 的 zip（含 ROM 包）；Magisk 模块（LSPosed 等）不行，请在系统里的 Magisk 装。
 - 界面语言跟随系统（15 种）。
 
 ## 许可
